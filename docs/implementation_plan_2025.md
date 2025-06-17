@@ -11,6 +11,7 @@
 - DEM data
 - Canopy height data
 - GEDI L2A data
+- forest mask #  forest mask should be attached to each patch instead of downloading seperately.
 
 * data collected between start date and end data (e.g. 2022-01-01 to 2022-12-31, usually whole year)
 * all data should be resampled to scale (defaults 10m, but try 30m for test)

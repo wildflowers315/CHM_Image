@@ -13,6 +13,7 @@ from tqdm import tqdm
 import rasterio
 from rasterio.transform import from_origin
 from rasterio.crs import CRS
+import math
 
 # Import custom functions
 from l2a_gedi_source import get_gedi_data
@@ -22,6 +23,127 @@ from for_forest_masking import apply_forest_mask, create_forest_mask
 from alos2_source import get_alos2_data
 from canopyht_source import get_canopyht_data
 from dem_source import get_dem_data
+
+# Import patch-related functions
+from data.image_patches import (
+    create_3d_patches, prepare_training_patches,
+    create_patch_grid, Patch
+)
+from data.large_area import collect_area_patches, merge_patch_predictions
+from config.resolution_config import get_patch_size, RESOLUTION_CONFIG
+
+def get_local_projection(lon, lat):
+    """Return a suitable projection string for the AOI center."""
+    if -80 <= lat <= 84:
+        utm_zone = int((lon + 180) / 6) + 1
+        hemisphere = 'N' if lat >= 0 else 'S'
+        if hemisphere == 'N':
+            return f'EPSG:326{utm_zone:02d}'
+        else:
+            return f'EPSG:327{utm_zone:02d}'
+    else:
+        return 'EPSG:3857'  # Web Mercator
+
+def create_patches_from_ee_image(image: ee.Image, aoi: ee.Geometry, patch_size: int, scale: int, overlap: float = 0.1) -> List[Dict]:
+    """
+    Create patches from Earth Engine image.
+    
+    Args:
+        image: Earth Engine image to create patches from
+        aoi: Area of interest geometry
+        patch_size: Size of patches in meters
+        scale: Resolution in meters
+        overlap: Overlap between patches as a fraction (0.0 to 1.0)
+        
+    Returns:
+        List of patch dictionaries with coordinates and data
+    """
+    image = image.toFloat()
+    center = aoi.centroid().coordinates().getInfo()
+    lon, lat = center
+    proj = get_local_projection(lon, lat)
+    # Try to project AOI, fallback to EPSG:3857, then EPSG:4326
+    try:
+        aoi_proj = aoi.transform(proj, 1)
+        bounds = aoi_proj.bounds(1).getInfo()
+    except Exception as e:
+        print(f"Failed to transform AOI to {proj}: {e}. Trying EPSG:3857.")
+        try:
+            proj = 'EPSG:3857'
+            aoi_proj = aoi.transform(proj, 1)
+            bounds = aoi_proj.bounds(1).getInfo()
+        except Exception as e2:
+            print(f"Failed to transform AOI to EPSG:3857: {e2}. Using EPSG:4326.")
+            proj = 'EPSG:4326'
+            aoi_proj = aoi.transform(proj, 1)
+            bounds = aoi_proj.bounds(1).getInfo()
+    min_x, min_y = bounds['coordinates'][0][0]
+    max_x, max_y = bounds['coordinates'][0][2]
+    stride = int(patch_size * (1 - overlap))
+    width = max_x - min_x
+    height = max_y - min_y
+    n_patches_x = max(1, int(np.ceil(width / stride)))
+    n_patches_y = max(1, int(np.ceil(height / stride)))
+    print(f"Creating {n_patches_x * n_patches_y} patches with size {patch_size}m and {overlap*100}% overlap")
+    print(f"Using projection: {proj}")
+    patches = []
+    for i in range(n_patches_x):
+        for j in range(n_patches_y):
+            x = min_x + i * stride
+            y = min_y + j * stride
+            try:
+                patch_geom_proj = ee.Geometry.Rectangle([
+                    [x, y],
+                    [min(x + patch_size, max_x), min(y + patch_size, max_y)]
+                ], proj, False)
+                patch_geom = patch_geom_proj.transform('EPSG:4326', 1)
+            except Exception as e:
+                print(f"Failed to create/transform patch geometry at ({x},{y}): {e}. Skipping patch.")
+                continue
+            is_extruded = (
+                x + patch_size > max_x or
+                y + patch_size > max_y
+            )
+            actual_width = min(patch_size, max_x - x)
+            actual_height = min(patch_size, max_y - y)
+            patch_data = image.clip(patch_geom).toFloat()
+            patches.append({
+                'geometry': patch_geom,
+                'geometry_proj': patch_geom_proj,
+                'x': x,
+                'y': y,
+                'width': patch_size if not is_extruded else actual_width,
+                'height': patch_size if not is_extruded else actual_height,
+                'data': patch_data,
+                'is_extruded': is_extruded,
+                'projection': proj
+            })
+    return patches
+
+def export_patches_to_tif(patches: List[Dict], output_dir: str, prefix: str, scale: int):
+    """
+    Export patches to GeoTIFF files.
+    
+    Args:
+        patches: List of patch dictionaries
+        output_dir: Output directory
+        prefix: Prefix for output files
+        scale: Resolution in meters
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    for i, patch in enumerate(patches):
+        # Generate patch filename
+        patch_filename = f"{prefix}_patch_{i:04d}.tif"
+        patch_path = os.path.join(output_dir, patch_filename)
+        
+        # Export patch
+        export_tif_via_ee(
+            image=patch['data'],
+            aoi=patch['geometry'],
+            prefix=patch_filename,
+            scale=scale
+        )
 
 def load_aoi(aoi_path: str) -> ee.Geometry:
     """
@@ -83,8 +205,8 @@ def parse_args():
     parser.add_argument('--ndvi-threshold', type=float, default=0.3, help='NDVI threshold for forest mask')
     
     # GEDI parameters
-    parser.add_argument('--gedi-start-date', type=str, help='GEDI start date (YYYY-MM-DD)')
-    parser.add_argument('--gedi-end-date', type=str, help='GEDI end date (YYYY-MM-DD)')
+    parser.add_argument('--gedi-start-date', type=str, default='2020-01-01', help='GEDI start date (YYYY-MM-DD)')
+    parser.add_argument('--gedi-end-date', type=str, default='2020-12-31', help='GEDI end date (YYYY-MM-DD)')
     parser.add_argument('--quantile', type=str, default='098', help='GEDI height quantile')
     parser.add_argument('--gedi-type', type=str, default='singleGEDI', help='GEDI data type')
     # Add buffer for AOI with default value 1000m
@@ -115,6 +237,16 @@ def parse_args():
                        help='Export forest mask as TIF')
     parser.add_argument('--export-predictions', action='store_true',
                        help='Export predictions as TIF')
+    
+    # Patch processing parameters
+    parser.add_argument('--use-patches', action='store_true',
+                       help='Enable patch-based processing')
+    parser.add_argument('--patch-size', type=int, default=None,
+                       help='Size of patches in meters (default: calculated from scale)')
+    parser.add_argument('--patch-overlap', type=float, default=0.0,
+                       help='Overlap between patches (0.0 to 1.0)')
+    parser.add_argument('--export-patches', action='store_true',
+                       help='Export individual patches as TIF files')
     
     args = parser.parse_args()
     return args
@@ -232,137 +364,268 @@ def export_tif_via_ee(image: ee.Image, aoi: ee.Geometry, prefix: str, scale: int
     print(f"Export started with task ID: {task_id}")
     print("The file will be available in your Google Drive once the export completes.")
     
+def create_patch_geometries(aoi: ee.Geometry, patch_size: int, overlap: float = 0.1) -> list:
+    """Split AOI into patch geometries in meters using local projection, then transform to WGS84. If AOI is smaller than patch_size, buffer it to reach minimum patch_size. If projection fails, calculate patch grid in degrees using an approximate conversion."""
+    # Print AOI bounds in degrees (WGS84)
+    try:
+        wgs84_bounds = aoi.bounds().getInfo()
+        wgs84_min_x, wgs84_min_y = wgs84_bounds['coordinates'][0][0]
+        wgs84_max_x, wgs84_max_y = wgs84_bounds['coordinates'][0][2]
+        print(f"[DEBUG] AOI bounds in WGS84: min_x={wgs84_min_x}, max_x={wgs84_max_x}, min_y={wgs84_min_y}, max_y={wgs84_max_y}")
+    except Exception as e:
+        print(f"[DEBUG] Could not get AOI bounds in WGS84: {e}")
+    center = aoi.centroid().coordinates().getInfo()
+    lon, lat = center
+    # Choose projection
+    if -80 <= lat <= 84:
+        utm_zone = int((lon + 180) / 6) + 1
+        hemisphere = 'N' if lat >= 0 else 'S'
+        if hemisphere == 'N':
+            proj = f'EPSG:326{utm_zone:02d}'
+        else:
+            proj = f'EPSG:327{utm_zone:02d}'
+    else:
+        proj = 'EPSG:3857'
+    # Project AOI
+    try:
+        aoi_proj = aoi.transform(proj, 1)
+        bounds = aoi_proj.bounds(1).getInfo()
+        min_x, min_y = bounds['coordinates'][0][0]
+        max_x, max_y = bounds['coordinates'][0][2]
+        width = max_x - min_x
+        height = max_y - min_y
+        print(f"[DEBUG] AOI bounds in {proj}: min_x={min_x}, max_x={max_x}, min_y={min_y}, max_y={max_y}")
+        print(f"[DEBUG] AOI width: {width} meters, height: {height} meters, patch_size: {patch_size} meters")
+        if width < 1 or height < 1:
+            print(f"[WARNING] Projected AOI width or height is less than 1 meter. Falling back to patch grid in degrees.")
+            raise ValueError("Projected AOI too small, fallback to degrees.")
+        # Buffer if AOI is smaller than patch_size
+        buffer_x = max(0, (patch_size - width) / 2)
+        buffer_y = max(0, (patch_size - height) / 2)
+        if buffer_x > 0 or buffer_y > 0:
+            buffer_amount = max(buffer_x, buffer_y)
+            print(f"AOI is smaller than patch_size. Buffering AOI by {buffer_amount:.2f} meters (projected).")
+            aoi_proj = aoi_proj.buffer(buffer_amount)
+            bounds = aoi_proj.bounds(1).getInfo()
+            min_x, min_y = bounds['coordinates'][0][0]
+            max_x, max_y = bounds['coordinates'][0][2]
+            width = max_x - min_x
+            height = max_y - min_y
+            print(f"[DEBUG] After buffering: min_x={min_x}, max_x={max_x}, min_y={min_y}, max_y={max_y}")
+            print(f"[DEBUG] After buffering: width={width} meters, height={height} meters")
+        stride = patch_size * (1 - overlap)
+        n_patches_x = max(1, int(math.ceil(width / stride)))
+        n_patches_y = max(1, int(math.ceil(height / stride)))
+        patch_geoms = []
+        for i in range(n_patches_x):
+            for j in range(n_patches_y):
+                x = min_x + i * stride
+                y = min_y + j * stride
+                patch_geom_proj = ee.Geometry.Rectangle([
+                    [x, y],
+                    [min(x + patch_size, max_x), min(y + patch_size, max_y)]
+                ], proj, False)
+                patch_geom = patch_geom_proj.transform('EPSG:4326', 1)
+                patch_geoms.append(patch_geom)
+        print(f"Created {len(patch_geoms)} patch geometries.")
+        return patch_geoms
+    except Exception as e:
+        print(f"Projection failed or fallback triggered: {e}, using WGS84 and patch grid in degrees.")
+        proj = 'EPSG:4326'
+        # Approximate conversion: 1 degree ≈ 111320 meters at equator
+        patch_size_deg = patch_size / 111320.0
+        stride_deg = patch_size_deg * (1 - overlap)
+        width = wgs84_max_x - wgs84_min_x
+        height = wgs84_max_y - wgs84_min_y
+        print(f"[DEBUG] AOI width in degrees: {width}, height in degrees: {height}, patch_size in degrees: {patch_size_deg}")
+        buffer_x = max(0, (patch_size_deg - width) / 2)
+        buffer_y = max(0, (patch_size_deg - height) / 2)
+        if buffer_x > 0 or buffer_y > 0:
+            buffer_amount_deg = max(buffer_x, buffer_y)
+            print(f"AOI is smaller than patch_size. Buffering AOI by {buffer_amount_deg:.6f} degrees (approximate, fallback).")
+            aoi = aoi.buffer(buffer_amount_deg)
+            wgs84_bounds = aoi.bounds().getInfo()
+            wgs84_min_x, wgs84_min_y = wgs84_bounds['coordinates'][0][0]
+            wgs84_max_x, wgs84_max_y = wgs84_bounds['coordinates'][0][2]
+            width = wgs84_max_x - wgs84_min_x
+            height = wgs84_max_y - wgs84_min_y
+            print(f"[DEBUG] After buffering: min_x={wgs84_min_x}, max_x={wgs84_max_x}, min_y={wgs84_min_y}, max_y={wgs84_max_y}")
+            print(f"[DEBUG] After buffering: width={width} degrees, height={height} degrees")
+        n_patches_x = max(1, int(math.ceil(width / stride_deg)))
+        n_patches_y = max(1, int(math.ceil(height / stride_deg)))
+        patch_geoms = []
+        for i in range(n_patches_x):
+            for j in range(n_patches_y):
+                x = wgs84_min_x + i * stride_deg
+                y = wgs84_min_y + j * stride_deg
+                patch_geom = ee.Geometry.Rectangle([
+                    [x, y],
+                    [min(x + patch_size_deg, wgs84_max_x), min(y + patch_size_deg, wgs84_max_y)]
+                ], proj, False)
+                patch_geoms.append(patch_geom)
+        print(f"Created {len(patch_geoms)} patch geometries (in degrees).")
+        return patch_geoms
+
 def main():
     """Main function to run the canopy height mapping process."""
-    # Parse arguments
     args = parse_args()
-    
-    # Initialize Earth Engine
     initialize_ee()
-    
-    # Load AOI
     original_aoi = load_aoi(args.aoi)
-    aoi_buffered = original_aoi.buffer(args.buffer) if args.buffer > 0 else original_aoi
-    
-    # Set dates
+    aoi_buffered = original_aoi.buffer(args.buffer).transform('EPSG:4326', 1) if args.buffer > 0 else original_aoi
     start_date = f"{args.year}-{args.start_date}"
     end_date = f"{args.year}-{args.end_date}"
-    
-    # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
-    
-    # Get S1, S2 satellite data
-    print("Collecting satellite data...")
-    s1 = get_sentinel1_data(aoi_buffered, args.year, args.start_date, args.end_date)
-    s2 = get_sentinel2_data(aoi_buffered, args.year, args.start_date, args.end_date, args.clouds_th)
-    # Import ALOS2 sar data
-    alos2 = get_alos2_data(aoi_buffered, args.year, args.start_date, args.end_date,include_texture=False,
-                speckle_filter=False)
-    # Get terrain data
-    dem_data = get_dem_data(aoi_buffered)
-    
-    # Canopy height data
-    canopy_ht = get_canopyht_data(aoi_buffered)
-    
-    # Reproject datasets to the same projection
-    s2_projection = s2.projection()
-    s2 = s2.float()                                       # Convert to Float32
-    dem_data = dem_data.float()  # Convert to Float32
-    s1 = s1.float()              # Convert to Float32
-    alos2 = alos2.float()        # Convert to Float32
-    canopy_ht = canopy_ht.float()  # Convert to Float32
 
-    # Merge datasets
-    merged = s2.addBands(s1).addBands(alos2).addBands(dem_data).addBands(canopy_ht)
+    if args.use_patches:
+        print(f"Creating patch geometries with size {args.patch_size}m and {args.patch_overlap*100}% overlap...")
+        patch_geoms = create_patch_geometries(aoi_buffered, args.patch_size, args.patch_overlap)
+        for i, patch_geom in enumerate(patch_geoms):
+            patch_id = f"patch{i:04d}"
+            print(f"Processing {patch_id}")
+            # Collect satellite data for this patch
+            s1 = get_sentinel1_data(patch_geom, args.year, args.start_date, args.end_date).toFloat()
+            s2 = get_sentinel2_data(patch_geom, args.year, args.start_date, args.end_date, args.clouds_th).toFloat()
+            alos2 = get_alos2_data(patch_geom, args.year, args.start_date, args.end_date, include_texture=False, speckle_filter=False).toFloat()
+            # Only add ALOS2 bands that exist
+            alos2_band_names = alos2.bandNames().getInfo()
+            patch_data = s1.addBands(s2)
+            if 'ALOS2_HH' in alos2_band_names:
+                patch_data = patch_data.addBands(alos2.select('ALOS2_HH'))
+            if 'ALOS2_HV' in alos2_band_names:
+                patch_data = patch_data.addBands(alos2.select('ALOS2_HV'))
+            dem_data = get_dem_data(patch_geom).toFloat()
+            canopy_ht = get_canopyht_data(patch_geom).toFloat()
+            forest_mask = create_forest_mask(
+                args.mask_type,
+                patch_geom,
+                ee.Date(start_date),
+                ee.Date(end_date),
+                args.ndvi_threshold
+            ).toFloat()
+            patch_data = patch_data.addBands(dem_data).addBands(canopy_ht)
+            # Add forest mask as a band instead of using updateMask
+            patch_data = patch_data.addBands(forest_mask.rename('forest_mask'))
+            # Get GEDI data
+            print("Loading GEDI data...")
+            gedi = get_gedi_data(patch_geom, args.gedi_start_date, args.gedi_end_date, args.quantile)
+            
+            # Check GEDI data availability
+            print("\nChecking GEDI data availability...")
+            # Get a sample of the data to check values
+            gedi_sample = gedi.select('rh').sample(
+                region=patch_geom,
+                scale=args.scale,
+                numPixels=1000,
+                seed=42
+            ).getInfo()
+            
+            # Count non-null values
+            valid_values = [f['properties']['rh'] for f in gedi_sample['features'] if f['properties']['rh'] is not None]
+            print(f"Number of valid GEDI measurements in sample: {len(valid_values)}")
+            if valid_values:
+                print(f"GEDI height range: {min(valid_values):.2f} to {max(valid_values):.2f} meters")
+            else:
+                print("WARNING: No valid GEDI measurements found in the area!")
+                print("This could be due to:")
+                print("1. No GEDI coverage in this area")
+                print("2. Quality filters being too strict")
+                print("3. Time period not having data")
+            
+            # Convert GEDI points to raster at specified scale and ensure Float32 type
+            print("\nConverting GEDI points to raster...")
+            gedi_raster = gedi.select('rh').toFloat()# .rename('gedi_rh')
+            
+            # Add GEDI raster to patch data
+            patch_gedi = gedi_raster.clip(patch_geom)
+            patch_data = patch_data.addBands(patch_gedi)
+            
+            band_count = patch_data.bandNames().length()
+            # Get geojson file name (without extension)
+            geojson_name = os.path.splitext(os.path.basename(args.aoi))[0]
+            # Compose fileNamePrefix as requested
+            fileNamePrefix = f"{geojson_name}_bandNum{{}}_scale{args.scale}_{patch_id}".format(band_count.getInfo() if hasattr(band_count, 'getInfo') else band_count)
+            if args.export_patches:
+                export_task = ee.batch.Export.image.toDrive(
+                    image=patch_data,
+                    description=f"{patch_id}_data",
+                    fileNamePrefix=fileNamePrefix,
+                    folder='GEE_exports',
+                    scale=args.scale,
+                    region=patch_geom,
+                    fileFormat='GeoTIFF',
+                    maxPixels=1e13,
+                    crs='EPSG:4326'
+                )
+                export_task.start()
+                print(f"Started export for {patch_id} with fileNamePrefix: {fileNamePrefix}")
+                break  # Only export the first patch for now (testing)
+    else:
+        # Fallback: process whole AOI as before
+        print("Processing whole AOI (not patch-based)...")
+        s1 = get_sentinel1_data(aoi_buffered, args.year, args.start_date, args.end_date).toFloat()
+        s2 = get_sentinel2_data(aoi_buffered, args.year, args.start_date, args.end_date, args.clouds_th).toFloat()
+        alos2 = get_alos2_data(aoi_buffered, args.year, args.start_date, args.end_date, include_texture=False, speckle_filter=False).toFloat()
+        # Only add ALOS2 bands that exist
+        alos2_band_names = alos2.bandNames().getInfo()
+        data = s1.addBands(s2).addBands(alos2)
+        dem_data = get_dem_data(aoi_buffered).toFloat()
+        canopy_ht = get_canopyht_data(aoi_buffered).toFloat()
+        forest_mask = create_forest_mask(
+            args.mask_type,
+            aoi_buffered,
+            ee.Date(start_date),
+            ee.Date(end_date),
+            args.ndvi_threshold
+        ).toFloat()
+        data = data.addBands(dem_data).addBands(canopy_ht)
+        data = data.updateMask(forest_mask)
+        # Get GEDI data
+        print("Loading GEDI data...")
+        gedi = get_gedi_data(aoi_buffered, args.gedi_start_date, args.gedi_end_date, args.quantile)
         
-    # Get predictor names before any masking
-    print("Getting band information...")
-    predictor_names = merged.bandNames()
-    n_predictors = predictor_names.size().getInfo()
-    var_split_rf = int(np.sqrt(n_predictors).round())
+        # Check GEDI data availability
+        print("\nChecking GEDI data availability...")
+        # Get a sample of the data to check values
+        gedi_sample = gedi.select('rh').sample(
+            region=aoi_buffered,
+            scale=args.scale,
+            numPixels=1000,
+            seed=42
+        ).getInfo()
         
-    # Create and apply forest mask
-    print(f"Creating and applying forest mask (type: {args.mask_type})...")
-    buffered_forest_mask = create_forest_mask(args.mask_type, aoi_buffered,
-                                   ee.Date(f"{args.year}-{args.start_date}"),
-                                   ee.Date(f"{args.year}-{args.end_date}"),
-                                   args.ndvi_threshold)
-
-    forest_mask = buffered_forest_mask.clip(original_aoi)
-    
-    ndvi_threshold_percent = int(round(args.ndvi_threshold * 100,0))
-    
-    # Get GEDI data
-    print("Loading GEDI data...")
-    gedi = get_gedi_data(aoi_buffered, args.gedi_start_date, args.gedi_end_date, args.quantile)
-    
-    # forest_geometry = forest_mask.geometry()
-    # Sample GEDI points
-    gedi_points = gedi.sample(
-        region=aoi_buffered,
-        scale=args.scale,
-        geometries=True,
-        dropNulls=True,
-        seed=42
-    )
-    
-        # Sample points
-    reference_data = merged.sampleRegions(
-        collection=gedi_points,
-        scale=args.scale,
-        projection=s2_projection,
-        tileScale=1,
-        geometries=True
-    )
-    
-    # Clip to original AOI
-    merged = merged.clip(original_aoi)
-    
-    # Export training data if requested
-    if args.export_training:
-        print('Exporting training data and tif through Earth Engine...')
-        training_prefix = f'training_data_{args.mask_type}{ndvi_threshold_percent}_b{n_predictors}'
-        # export_training_data_via_ee(reference_data, training_prefix)
-        export_featurecollection_to_csv(reference_data, training_prefix)
-        print(f"Exporting training data as CSV: {training_prefix}.csv")
-    
-    if args.export_stack:
-        # Export the complete data stack
-        print("Exporting full data stack...")
-        export_tif_via_ee(merged, original_aoi, 'stack', args.scale, args.resample)
+        # Count non-null values
+        valid_values = [f['properties']['rh'] for f in gedi_sample['features'] if f['properties']['rh'] is not None]
+        print(f"Number of valid GEDI measurements in sample: {len(valid_values)}")
+        if valid_values:
+            print(f"GEDI height range: {min(valid_values):.2f} to {max(valid_values):.2f} meters")
+        else:
+            print("WARNING: No valid GEDI measurements found in the area!")
+            print("This could be due to:")
+            print("1. No GEDI coverage in this area")
+            print("2. Quality filters being too strict")
+            print("3. Time period not having data")
         
-    if args.export_forest_mask:
-        # Export forest mask using export_tif_via_ee
-        forest_mask_prefix = f'forestMask{args.mask_type}{ndvi_threshold_percent}'
-        buffered_forest_mask_prefix = f'buffered_forestMask{args.mask_type}{ndvi_threshold_percent}'
-        # forest_mask_path = os.path.join(args.output_dir, f'{forest_mask_filename}.tif')
-        print(f"Exporting forest mask as {forest_mask_prefix}...")
-        export_tif_via_ee(forest_mask, original_aoi, forest_mask_prefix, args.scale, args.resample)
-        print(f"Exporting buffered forest mask as {buffered_forest_mask_prefix}...")
-        export_tif_via_ee(buffered_forest_mask, aoi_buffered, buffered_forest_mask_prefix, args.scale, args.resample)
-
-    # Export predictions if requested
-    if args.export_predictions:
-        # Train model
-        print("Training model...")
-        if args.model == "RF":
-            classifier = ee.Classifier.smileRandomForest(
-                numberOfTrees=args.num_trees_rf,
-                variablesPerSplit=var_split_rf,
-                minLeafPopulation=args.min_leaf_pop_rf,
-                bagFraction=args.bag_frac_rf,
-                maxNodes=args.max_nodes_rf
-            ).setOutputMode("Regression") \
-            .train(reference_data, "rh", predictor_names)
-        
-            # Generate predictions
-        print("Generating predictions...")
-        predictions = merged.classify(classifier)
-        # prediction_path = os.path.join(args.output_dir, 'predictions.tif')
-        print('Exporting via Earth Engine instead')
-        export_tif_via_ee(predictions, original_aoi, 'predictionCHM', args.scale, args.resample)
-    
-    print("Processing complete.")
+        # Convert GEDI points to raster at specified scale and ensure Float32 type
+        print("\nConverting GEDI points to raster...")
+        gedi_raster = gedi.select('rh').toFloat()#.rename('gedi_rh')
+                # Add GEDI raster to patch data
+        patch_gedi = gedi_raster.clip(aoi_buffered)
+        data = data.addBands(patch_gedi)
+        # Export whole AOI if requested
+        if args.export_patches:
+            export_task = ee.batch.Export.image.toDrive(
+                image=data,
+                description="aoi_data",
+                fileNamePrefix=os.path.join(args.output_dir, 'aoi'),
+                folder='GEE_exports',
+                scale=args.scale,
+                region=aoi_buffered,
+                fileFormat='GeoTIFF',
+                maxPixels=1e13,
+                crs='EPSG:4326'
+            )
+            export_task.start()
+            print("Started export for AOI")
 
 if __name__ == "__main__":
     main()

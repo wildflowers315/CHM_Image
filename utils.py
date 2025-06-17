@@ -15,7 +15,7 @@ def get_latest_file(dir_path: str, pattern: str, required: bool = True) -> str:
 
 def geotiff_to_geojson(geotiff_path: str) -> str:
     """
-    Convert a GeoTIFF file's extent to a GeoJSON polygon.
+    Convert a GeoTIFF file's extent to a GeoJSON polygon in WGS84.
     
     Args:
         geotiff_path (str): Path to the input GeoTIFF file
@@ -36,6 +36,9 @@ def geotiff_to_geojson(geotiff_path: str) -> str:
         
         # Create GeoDataFrame with the rectangle
         gdf = gpd.GeoDataFrame(geometry=[rectangle], crs=src.crs)
+        
+        # Reproject to WGS84
+        gdf = gdf.to_crs(epsg=4326)
         
         # Save to GeoJSON
         gdf.to_file(geojson_path, driver='GeoJSON')

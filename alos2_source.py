@@ -15,6 +15,7 @@ def get_alos2_data(
 ) -> ee.Image:
     """
     Get ALOS-2 PALSAR data for the specified area and time period.
+    Handles missing bands gracefully.
     
     Args:
         aoi: Area of interest as Earth Engine Geometry
@@ -35,38 +36,31 @@ def get_alos2_data(
     # Using the ALOS/PALSAR/YEARLY collection (annual mosaics)
     # alos = ee.ImageCollection('JAXA/ALOS/PALSAR/YEARLY/SAR')"JAXA/ALOS/PALSAR/YEARLY/SAR"
     alos = ee.ImageCollection("JAXA/ALOS/PALSAR-2/Level2_2/ScanSAR")
-    alos.select(['HH', 'HV'])  # Select HH and HV bands
-    
-    # Filter by date and region
-    alos_filtered = alos.filterDate(start_date_ee, end_date_ee) \
-                       .filterBounds(aoi)
-    
-    # Apply pre-processing
+    alos_filtered = alos.filterDate(start_date_ee, end_date_ee).filterBounds(aoi)
+
     def preprocess_sar(img):
-        # Extract date information
-        date = ee.Date(img.get('system:time_start'))
-        
-        # Basic preprocessing - convert to natural units (from dB)
-        # HH and HV bands are stored in dB, convert to natural values for processing
-        hh = ee.Image(10.0).pow(img.select(['HH']).divide(10.0))
-        hv = ee.Image(10.0).pow(img.select(['HV']).divide(10.0))
-                
-        # Ratio (HH/HV)
-        ratio = hh.divide(hv).rename('ALOS2_ratio')
-        
-        # Normalized difference (HH-HV)/(HH+HV)
-        ndri = hh.subtract(hv).divide(hh.add(hv)).rename('ALOS2_ndri')
-        
-        # Combine all bands
-        processed = img
-        
-        processed = processed.addBands([hh, hv, ratio, ndri])
-        
-        return processed
+        band_names = img.bandNames()
+        bands_to_select = []
+        if band_names.contains('HH'):
+            bands_to_select.append('HH')
+        if band_names.contains('HV'):
+            bands_to_select.append('HV')
+        if bands_to_select:
+            img = img.select(bands_to_select)
+        # Only process ratio/ndri if both HH and HV are present
+        if band_names.contains('HH') and band_names.contains('HV'):
+            hh = ee.Image(10.0).pow(img.select(['HH']).divide(10.0))
+            hv = ee.Image(10.0).pow(img.select(['HV']).divide(10.0))
+            ratio = hh.divide(hv).rename('ALOS2_ratio')
+            ndri = hh.subtract(hv).divide(hh.add(hv)).rename('ALOS2_ndri')
+            img = img.addBands([hh, hv, ratio, ndri])
+        elif band_names.contains('HH'):
+            hh = ee.Image(10.0).pow(img.select(['HH']).divide(10.0))
+            img = img.addBands([hh])
+        return img
     
-    # Apply preprocessing to all images
     # alos_processed = alos_filtered.map(preprocess_sar)
-    
+    alos_processed = alos_filtered
     # Apply speckle filtering if requested
     if speckle_filter:
         def apply_speckle_filter(img):
@@ -83,57 +77,50 @@ def get_alos2_data(
         
         alos_processed = alos_processed.map(apply_speckle_filter)
     
-    # Add texture metrics if requested
+    # Add texture metrics if requested and bands exist
     if include_texture:
         def add_texture(img):
-            # Define windows sizes for texture calculation
-            windows = [3, 5]
-            
+            band_names = img.bandNames()
             texture_bands = []
-            
-            for window in windows:
-                # Calculate GLCM texture metrics for HH and HV bands
-                glcm_hh = img.select('HH').glcmTexture(window)
-                glcm_hv = img.select('HV').glcmTexture(window)
-                
-                # Rename bands to include window size
-                glcm_hh = glcm_hh.rename([
-                    f'HH_contrast_{window}', f'HH_dissimilarity_{window}', 
-                    f'HH_homogeneity_{window}', f'HH_ASM_{window}', 
-                    f'HH_energy_{window}', f'HH_max_{window}', 
-                    f'HH_entropy_{window}', f'HH_correlation_{window}'
-                ])
-                
-                glcm_hv = glcm_hv.rename([
-                    f'HV_contrast_{window}', f'HV_dissimilarity_{window}', 
-                    f'HV_homogeneity_{window}', f'HV_ASM_{window}', 
-                    f'HV_energy_{window}', f'HV_max_{window}', 
-                    f'HV_entropy_{window}', f'HV_correlation_{window}'
-                ])
-                
-                texture_bands.extend([glcm_hh, glcm_hv])
-            
-            # Add texture bands to the image
-            return img.addBands(texture_bands)
-        
+            windows = [3, 5]
+            if band_names.contains('HH'):
+                for window in windows:
+                    glcm_hh = img.select('HH').glcmTexture(window)
+                    glcm_hh = glcm_hh.rename([
+                        f'HH_contrast_{window}', f'HH_dissimilarity_{window}',
+                        f'HH_homogeneity_{window}', f'HH_ASM_{window}',
+                        f'HH_energy_{window}', f'HH_max_{window}',
+                        f'HH_entropy_{window}', f'HH_correlation_{window}'
+                    ])
+                    texture_bands.append(glcm_hh)
+            if band_names.contains('HV'):
+                for window in windows:
+                    glcm_hv = img.select('HV').glcmTexture(window)
+                    glcm_hv = glcm_hv.rename([
+                        f'HV_contrast_{window}', f'HV_dissimilarity_{window}',
+                        f'HV_homogeneity_{window}', f'HV_ASM_{window}',
+                        f'HV_energy_{window}', f'HV_max_{window}',
+                        f'HV_entropy_{window}', f'HV_correlation_{window}'
+                    ])
+                    texture_bands.append(glcm_hv)
+            if texture_bands:
+                img = img.addBands(texture_bands)
+            return img
         alos_processed = alos_processed.map(add_texture)
     
-    alos_processed = alos_filtered.select(['HH', 'HV'],['ALOS2_HH', 'ALOS2_HV'])
-    # Create median composite
-    alos_median = alos_processed.median()
-    
-    # Clip to area of interest
-    alos_median = alos_median.clip(aoi)
-    
-    # Convert HH and HV bands back to dB for final output
-    # This makes it consistent with typical SAR data representation
-    def convert_to_db(img):
-        hh_db = ee.Image(10).multiply(img.select('HH').log10()).rename('HH_dB')
-        hv_db = ee.Image(10).multiply(img.select('HV').log10()).rename('HV_dB')
-        return img.addBands([hh_db, hv_db])
-    
-    # alos_median = convert_to_db(alos_median)
-    
+    # Median composite (will only use available bands)
+    alos_median = alos_processed.median().clip(aoi)
+    band_names = alos_median.bandNames().getInfo()
+    select_bands = []
+    rename_bands = []
+    if 'HH' in band_names:
+        select_bands.append('HH')
+        rename_bands.append('ALOS2_HH')
+    if 'HV' in band_names:
+        select_bands.append('HV')
+        rename_bands.append('ALOS2_HV')
+    if select_bands:
+        alos_median = alos_median.select(select_bands, rename_bands)
     return alos_median
 
 def get_alos2_mosaic(

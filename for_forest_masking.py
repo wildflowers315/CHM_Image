@@ -24,14 +24,11 @@ def create_forest_mask(
         ee.Image: Binary forest mask (1 for forest, 0 for non-forest)
     """
     # Initialize masks with default (all ones)
-    # dw_mask = ee.Image(1).clip(aoi)
-    # fnf_mask = ee.Image(1).clip(aoi)
-    # ndvi_mask = ee.Image(1).clip(aoi)
-    dw_mask = ee.Image(0).clip(aoi)
-    fnf_mask = ee.Image(0).clip(aoi)
-    ndvi_mask = ee.Image(0).clip(aoi)
-    wc_mask = ee.Image(0).clip(aoi)
-    ch_mask = ee.Image(0).clip(aoi)
+    dw_mask = ee.Image(1).clip(aoi)
+    fnf_mask = ee.Image(1).clip(aoi)
+    ndvi_mask = ee.Image(1).clip(aoi)
+    wc_mask = ee.Image(1).clip(aoi)
+    ch_mask = ee.Image(1).clip(aoi)
     
     # Create a buffered version of the AOI to ensure we get all relevant tiles
     buffered_aoi = aoi.buffer(10000)  # Buffer by 5km
@@ -177,9 +174,8 @@ def create_forest_mask(
         forest_mask = ch_mask
     elif mask_type == 'ALL':
         # Combine all masks (if ANY mask indicates forest, treat as forest)
-        forest_mask = dw_mask.Or(fnf_mask).Or(wc_mask)#.Or(ndvi_mask).
-        forest_mask = forest_mask.And(ch_mask).And(ndvi_mask)
-        # .And(fnf_mask)
+        forest_mask = dw_mask.Or(fnf_mask).Or(wc_mask).Or(ndvi_mask)
+        forest_mask = forest_mask.And(ch_mask)  # Only require canopy height
     else:
         forest_mask = ee.Image(1).clip(aoi)
     

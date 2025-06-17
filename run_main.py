@@ -18,12 +18,23 @@ def parse_args():
                        choices=['data_preparation', 'height_analysis', 'train_predict', 'evaluate'],
                        help='Processing steps to perform (can specify multiple)')
     parser.add_argument('--eval_tif_path', type=str, required=True, help='Path to the evaluation tif file')
+    parser.add_argument('--model', type=str, default='3d_unet', choices=['RF', '3d_unet'],
+                       help='Model type to use (RF or 3d_unet)')
+    parser.add_argument('--use-patches', action='store_true',
+                       help='Use patch-based processing (required for 3D U-Net)')
+    parser.add_argument('--patch-size', type=int, default=2560,
+                       help='Size of patches in meters (default: 2560)')
+    parser.add_argument('--patch-overlap', type=float, default=0.1,
+                       help='Overlap between patches (0.0 to 1.0)')
     return parser.parse_args()
 
 def get_gedi_dates(year, start_date, end_date):
     """Convert input dates to GEDI date format (YYYY-MM-DD)"""
-    start = f"{year}-{start_date}"
-    end = f"{year}-{end_date}"
+    # start = f"{year}-{start_date}"
+    # end = f"{year}-{end_date}"
+    start = f"2019-{start_date}"
+    end = f"2022-{end_date}"
+
     return start, end
 
 def main(args):
@@ -41,6 +52,7 @@ def main(args):
     gedi_start_date, gedi_end_date = get_gedi_dates(args.year, args.start_date, args.end_date)
 
     # Build command for GEE model training and prediction
+    # Always use RF for GEE processing since it's the only supported model
     gee_cmd = [
         'python', 'chm_main.py',
         '--aoi', args.aoi_path,
@@ -52,7 +64,7 @@ def main(args):
         '--buffer', '0',
         '--clouds-th', '70',
         '--quantile', 'rh98',
-        '--model', 'RF',
+        '--model', 'RF',  # Always use RF for GEE
         '--num-trees-rf', '500',
         '--min-leaf-pop-rf', '5',
         '--bag-frac-rf', '0.5',
@@ -63,6 +75,15 @@ def main(args):
         '--ndvi-threshold', '0.35',
         '--mask-type', 'WC',
     ]
+
+    # Add patch-related arguments if using 3D U-Net
+    if args.model == '3d_unet':
+        gee_cmd.extend([
+            '--use-patches',
+            '--patch-size', str(args.patch_size),
+            '--patch-overlap', str(args.patch_overlap),
+            '--export-patches',
+        ])
 
     # Process each requested step
     for step in args.steps:
@@ -99,7 +120,17 @@ def main(args):
                     '--test-size', '0.1',
                     '--apply-forest-mask',
                     '--ch_col', 'rh',
+                    '--model', args.model
                 ]
+
+                if args.model == '3d_unet':
+                    train_cmd.extend([
+                        '--use-patches',
+                        '--patch-size', str(args.patch_size),
+                        '--patch-overlap', str(args.patch_overlap),
+                        '--patches-dir', os.path.join(output_dir, 'patches')
+                    ])
+
                 # Run local training and prediction
                 print("\nRunning local model training and prediction...")
                 subprocess.run([str(arg) for arg in train_cmd], check=True)
@@ -118,7 +149,8 @@ def main(args):
                 '--pdf',
                 '--training', training_file,
                 '--merged', stack_file,
-                '--forest-mask', mask_file
+                '--forest-mask', mask_file,
+                '--model', args.model
             ]
             print("\nRunning evaluation...")
             subprocess.run([str(arg) for arg in eval_cmd], check=True)
