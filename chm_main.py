@@ -20,7 +20,6 @@ from sentinel1_source import get_sentinel1_data
 from sentinel2_source import get_sentinel2_data
 from for_forest_masking import apply_forest_mask, create_forest_mask
 from alos2_source import get_alos2_data
-from new_random_sampling import create_training_data, generate_sampling_sites
 from canopyht_source import get_canopyht_data
 from dem_source import get_dem_data
 
@@ -243,7 +242,7 @@ def main():
     
     # Load AOI
     original_aoi = load_aoi(args.aoi)
-    aoi_buffered  = original_aoi.buffer(args.buffer)
+    aoi_buffered = original_aoi.buffer(args.buffer) if args.buffer > 0 else original_aoi
     
     # Set dates
     start_date = f"{args.year}-{args.start_date}"
