@@ -68,25 +68,156 @@ def load_rgb_composite(merged_path, target_shape, transform, temp_dir=None):
         
     try:
         with rasterio.open(merged_path) as src:
-            if src.count >= 4:  # Check if we have enough bands
-                # Use S2 bands 4,3,2 (R,G,B) for natural color
-                rgb_bands = [3, 2, 1]  # B4 (R, 665nm), B3 (G, 560nm), B2 (B, 490nm)
+            # Check if this is already an RGB composite (3 bands)
+            if src.count == 3:
+                print("Using existing RGB composite")
+                
+                # Check if this looks like raw reflectance data or already processed
+                sample_data = src.read(1, window=((0, min(100, src.height)), (0, min(100, src.width))))
+                max_val = sample_data.max()
+                
+                if max_val > 1000:  # Looks like raw Sentinel-2 reflectance data
+                    print("RGB composite contains raw reflectance values, applying proper normalization...")
+                    
+                    rgb = np.zeros((target_shape[0], target_shape[1], 3), dtype=np.float32)
+                    
+                    from rasterio.warp import reproject, Resampling
+                    for i in range(3):
+                        band_data = src.read(i + 1)
+                        band_resampled = np.zeros(target_shape, dtype=np.float32)
+                        reproject(
+                            band_data,
+                            band_resampled,
+                            src_transform=src.transform,
+                            src_crs=src.crs,
+                            dst_transform=transform,
+                            dst_crs=src.crs,
+                            resampling=Resampling.bilinear
+                        )
+                        rgb[:, :, i] = band_resampled
+                    
+                    # Apply proper Sentinel-2 normalization to raw reflectance data
+                    rgb_norm = np.zeros_like(rgb, dtype=np.uint8)
+                    
+                    # Use adaptive range based on actual data
+                    for i, band_name in enumerate(['Red', 'Green', 'Blue']):
+                        band_data = rgb[:, :, i]
+                        valid_mask = ~np.isnan(band_data) & (band_data > 0)
+                        
+                        if valid_mask.sum() > 0:
+                            # Get data range and use 90% for better contrast
+                            data_min = band_data[valid_mask].min()
+                            data_max = band_data[valid_mask].max()
+                            scale_max = data_max * 0.85  # Use 85% of max for better visualization
+                            
+                            print(f"  {band_name}: {data_min:.0f} - {scale_max:.0f} -> 0-255")
+                            
+                            rgb_norm[:,:,i] = scale_adjust_band(
+                                band_data,
+                                data_min,
+                                scale_max,
+                                contrast=1.15,  # Moderate contrast enhancement
+                                gamma=0.85      # Slight gamma correction
+                            )
+                        else:
+                            rgb_norm[:,:,i] = 0
+                
+                else:
+                    print("RGB composite appears pre-processed, using as-is...")
+                    rgb = np.zeros((target_shape[0], target_shape[1], 3), dtype=np.float32)
+                    
+                    from rasterio.warp import reproject, Resampling
+                    for i in range(3):
+                        band_data = src.read(i + 1)
+                        band_resampled = np.zeros(target_shape, dtype=np.float32)
+                        reproject(
+                            band_data,
+                            band_resampled,
+                            src_transform=src.transform,
+                            src_crs=src.crs,
+                            dst_transform=transform,
+                            dst_crs=src.crs,
+                            resampling=Resampling.bilinear
+                        )
+                        rgb[:, :, i] = band_resampled
+                    
+                    # Assume already scaled to 0-255 for pre-processed RGB composite
+                    rgb_norm = rgb.astype(np.uint8)
+                
+                print(f"RGB composite loaded: shape={rgb_norm.shape}, range={rgb_norm.min()}-{rgb_norm.max()}")
+                
+                # Save the RGB composite (this part was missing!)
+                profile = src.profile.copy()
+                profile.update({
+                    'height': target_shape[0],
+                    'width': target_shape[1],
+                    'transform': transform,
+                    'count': 3,
+                    'dtype': 'uint8'
+                })
+                try:
+                    with rasterio.open(merged_clipped_path, 'w', **profile) as dst:
+                        # Write bands in correct order (R,G,B)
+                        dst.write(rgb_norm.transpose(2, 0, 1))  # Convert HWC to CHW
+                except Exception as e:
+                    print(f"Warning: Could not save RGB composite: {e}")
+                    print(f"Attempted to save to: {merged_clipped_path}")
+                
+                return rgb_norm
+                
+            elif src.count >= 3:  # Multi-band data, extract RGB
+                print(f"Extracting RGB from {src.count}-band data")
+                
+                # Find RGB bands by description or assume band order
+                rgb_band_indices = []
+                band_descriptions = src.descriptions or []
+                
+                # Look for RGB bands - handle both exact matches and annotated descriptions
+                print(f"Band descriptions: {band_descriptions}")
+                
+                for target_band in ['B4', 'B3', 'B2']:  # Red, Green, Blue
+                    found = False
+                    for i, desc in enumerate(band_descriptions):
+                        if desc and (desc == target_band or desc.startswith(target_band)):
+                            rgb_band_indices.append(i + 1)  # 1-based indexing
+                            print(f"Found {target_band} in band {i+1}: {desc}")
+                            found = True
+                            break
+                    
+                    if not found:
+                        print(f"Warning: Could not find band {target_band}")
+                        # Try common positions as fallback
+                        if target_band == 'B4' and len(band_descriptions) > 4:
+                            rgb_band_indices.append(5)  # B4 might be 5th band
+                        elif target_band == 'B3' and len(band_descriptions) > 3:
+                            rgb_band_indices.append(4)  # B3 might be 4th band  
+                        elif target_band == 'B2' and len(band_descriptions) > 2:
+                            rgb_band_indices.append(3)  # B2 might be 3rd band
+                
+                # If we couldn't find specific bands, use first 3
+                if len(rgb_band_indices) < 3:
+                    print("Could not find B4,B3,B2 bands, using first 3 bands")
+                    rgb_band_indices = [1, 2, 3]
+                
+                print(f"Using bands {rgb_band_indices} for RGB")
+                
                 rgb = np.zeros((target_shape[0], target_shape[1], 3), dtype=np.float32)
                 
                 from rasterio.warp import reproject, Resampling
-                for i, band in enumerate(rgb_bands):
-                    band_data = src.read(band)  # Band numbers are 1-based
-                    band_resampled = np.zeros(target_shape, dtype=np.float32)
-                    reproject(
-                        band_data,
-                        band_resampled,
-                        src_transform=src.transform,
-                        src_crs=src.crs,
-                        dst_transform=transform,
-                        dst_crs=src.crs,
-                        resampling=Resampling.bilinear
-                    )
-                    rgb[:, :, i] = band_resampled
+                for i, band_idx in enumerate(rgb_band_indices[:3]):
+                    if band_idx <= src.count:
+                        band_data = src.read(band_idx)
+                        band_resampled = np.zeros(target_shape, dtype=np.float32)
+                        reproject(
+                            band_data,
+                            band_resampled,
+                            src_transform=src.transform,
+                            src_crs=src.crs,
+                            dst_transform=transform,
+                            dst_crs=src.crs,
+                            resampling=Resampling.bilinear
+                        )
+                        rgb[:, :, i] = band_resampled
                 
                 # Apply band-specific scaling for Sentinel-2 reflectance values
                 rgb_norm = np.zeros_like(rgb, dtype=np.uint8)
@@ -105,7 +236,7 @@ def load_rgb_composite(merged_path, target_shape, transform, temp_dir=None):
                         gamma=scale_params[i]['gamma']
                     )
                 
-                # save the RGB composite
+                # Save the RGB composite for multi-band case
                 profile = src.profile.copy()
                 profile.update({
                     'height': target_shape[0],
@@ -117,12 +248,15 @@ def load_rgb_composite(merged_path, target_shape, transform, temp_dir=None):
                 try:
                     with rasterio.open(merged_clipped_path, 'w', **profile) as dst:
                         # Write bands in correct order (R,G,B)
-                        dst.write(rgb_norm.transpose(2, 1, 0))
+                        dst.write(rgb_norm.transpose(2, 0, 1))  # Convert HWC to CHW
                 except Exception as e:
                     print(f"Warning: Could not save RGB composite: {e}")
                     print(f"Attempted to save to: {merged_clipped_path}")
-                    # Continue even if saving fails - we can still use the RGB data in memory
+                
                 return rgb_norm
+            else:
+                print(f"Not enough bands for RGB composite: {src.count}")
+                return None
     except Exception as e:
         print(f"Error creating RGB composite: {e}")
     return None
