@@ -16,7 +16,7 @@ from rasterio.crs import CRS
 import math
 
 # Import custom functions
-from l2a_gedi_source import get_gedi_data
+from l2a_gedi_source import get_gedi_data, export_gedi_points, get_gedi_vector_data, export_gedi_vector_points
 from sentinel1_source import get_sentinel1_data
 from sentinel2_source import get_sentinel2_data
 from for_forest_masking import apply_forest_mask, create_forest_mask
@@ -505,39 +505,30 @@ def main():
             patch_data = patch_data.addBands(dem_data).addBands(canopy_ht)
             # Add forest mask as a band instead of using updateMask
             patch_data = patch_data.addBands(forest_mask.rename('forest_mask'))
-            # Get GEDI data
-            print("Loading GEDI data...")
-            gedi = get_gedi_data(patch_geom, args.gedi_start_date, args.gedi_end_date, args.quantile)
             
-            # Check GEDI data availability
-            print("\nChecking GEDI data availability...")
-            # Get a sample of the data to check values
-            gedi_sample = gedi.select('rh').sample(
-                region=patch_geom,
-                scale=args.scale,
-                numPixels=1000,
-                seed=42
-            ).getInfo()
+            # Get GEDI vector data
+            print("Loading GEDI vector data...")
+            gedi_fc = get_gedi_vector_data(patch_geom, args.gedi_start_date, args.gedi_end_date, args.quantile)
             
-            # Count non-null values
-            valid_values = [f['properties']['rh'] for f in gedi_sample['features'] if f['properties']['rh'] is not None]
-            print(f"Number of valid GEDI measurements in sample: {len(valid_values)}")
-            if valid_values:
-                print(f"GEDI height range: {min(valid_values):.2f} to {max(valid_values):.2f} meters")
-            else:
-                print("WARNING: No valid GEDI measurements found in the area!")
-                print("This could be due to:")
-                print("1. No GEDI coverage in this area")
-                print("2. Quality filters being too strict")
-                print("3. Time period not having data")
+            # Export GEDI vector points as CSV and GeoJSON
+            geojson_name = os.path.splitext(os.path.basename(args.aoi))[0]
+            prefix = f"{geojson_name}_{patch_id}"
+            export_gedi_vector_points(gedi_fc, prefix)
             
-            # Convert GEDI points to raster at specified scale and ensure Float32 type
-            print("\nConverting GEDI points to raster...")
-            gedi_raster = gedi.select('rh').toFloat()# .rename('gedi_rh')
+            # Convert GEDI vector data to raster for the patch data
+            if gedi_fc is not None:
+                # Convert to raster using reduceToImage
+                gedi_raster = gedi_fc.select(args.quantile).reduceToImage(
+                    properties=[args.quantile],
+                    reducer=ee.Reducer.first()
+                ).rename('rh').toFloat()
+                
+                # Add GEDI raster to patch data
+                patch_gedi = gedi_raster.clip(patch_geom)
+                patch_data = patch_data.addBands(patch_gedi)
             
-            # Add GEDI raster to patch data
-            patch_gedi = gedi_raster.clip(patch_geom)
-            patch_data = patch_data.addBands(patch_gedi)
+            # Ensure all bands are Float32
+            patch_data = patch_data.toFloat()
             
             band_count = patch_data.bandNames().length()
             # Get geojson file name (without extension)
@@ -579,38 +570,31 @@ def main():
         ).toFloat()
         data = data.addBands(dem_data).addBands(canopy_ht)
         data = data.updateMask(forest_mask)
-        # Get GEDI data
-        print("Loading GEDI data...")
-        gedi = get_gedi_data(aoi_buffered, args.gedi_start_date, args.gedi_end_date, args.quantile)
         
-        # Check GEDI data availability
-        print("\nChecking GEDI data availability...")
-        # Get a sample of the data to check values
-        gedi_sample = gedi.select('rh').sample(
-            region=aoi_buffered,
-            scale=args.scale,
-            numPixels=1000,
-            seed=42
-        ).getInfo()
+        # Get GEDI vector data
+        print("Loading GEDI vector data...")
+        gedi_fc = get_gedi_vector_data(aoi_buffered, args.gedi_start_date, args.gedi_end_date, args.quantile)
         
-        # Count non-null values
-        valid_values = [f['properties']['rh'] for f in gedi_sample['features'] if f['properties']['rh'] is not None]
-        print(f"Number of valid GEDI measurements in sample: {len(valid_values)}")
-        if valid_values:
-            print(f"GEDI height range: {min(valid_values):.2f} to {max(valid_values):.2f} meters")
-        else:
-            print("WARNING: No valid GEDI measurements found in the area!")
-            print("This could be due to:")
-            print("1. No GEDI coverage in this area")
-            print("2. Quality filters being too strict")
-            print("3. Time period not having data")
+        # Export GEDI vector points as CSV and GeoJSON
+        geojson_name = os.path.splitext(os.path.basename(args.aoi))[0]
+        prefix = f"{geojson_name}_aoi"
+        export_gedi_vector_points(gedi_fc, prefix)
         
-        # Convert GEDI points to raster at specified scale and ensure Float32 type
-        print("\nConverting GEDI points to raster...")
-        gedi_raster = gedi.select('rh').toFloat()#.rename('gedi_rh')
-                # Add GEDI raster to patch data
-        patch_gedi = gedi_raster.clip(aoi_buffered)
-        data = data.addBands(patch_gedi)
+        # Convert GEDI vector data to raster for the main data
+        if gedi_fc is not None:
+            # Convert to raster using reduceToImage
+            gedi_raster = gedi_fc.select(args.quantile).reduceToImage(
+                properties=[args.quantile],
+                reducer=ee.Reducer.first()
+            ).rename('rh').toFloat()
+            
+            # Add GEDI raster to data
+            patch_gedi = gedi_raster.clip(aoi_buffered)
+            data = data.addBands(patch_gedi)
+        
+        # Ensure all bands are Float32
+        data = data.toFloat()
+        
         # Export whole AOI if requested
         if args.export_patches:
             export_task = ee.batch.Export.image.toDrive(
