@@ -246,7 +246,7 @@ def get_gedi_vector_data(
         aoi: Area of interest as Earth Engine Geometry
         start_date: Start date for GEDI data (YYYY-MM-DD)
         end_date: End date for GEDI data (YYYY-MM-DD)
-        quantile: Quantile for GEDI data (e.g., 'rh100')
+        quantile: Quantile for GEDI data (e.g., 'rh98')
     
     Returns:
         ee.FeatureCollection: GEDI vector data points

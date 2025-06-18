@@ -48,3 +48,6 @@ tests/
 tests/test*
 # docs/wholecode.md
 docs/pauls2024_githubrepo.md
+
+chm_env/*
+chm_env*
