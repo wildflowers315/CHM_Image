@@ -198,6 +198,11 @@ def parse_args():
     parser.add_argument('--mask-type', type=str, default='NDVI',
                        choices=['DW', 'FNF', 'NDVI', 'WC', 'CHM', 'ALL', 'none'],
                        help='Type of forest mask to apply')
+    # Temporal compositing parameters (Paul's 2025 methodology)
+    parser.add_argument('--temporal-mode', action='store_true',
+                       help='Enable Paul\'s 2025 temporal compositing (12-monthly data for S1/S2/ALOS2)')
+    parser.add_argument('--monthly-composite', type=str, default='median', choices=['median', 'mean'],
+                       help='Monthly composite method for temporal mode')
     # resample method
     parser.add_argument('--resample', type=str, default='bilinear', choices=['bilinear', 'bicubic'],
                        help='Resampling method for image export')
@@ -254,7 +259,29 @@ def parse_args():
 def initialize_ee():
     """Initialize Earth Engine with project ID."""
     EE_PROJECT_ID = "my-project-423921"
-    ee.Initialize(project=EE_PROJECT_ID)
+    
+    try:
+        # Try to initialize with existing credentials
+        ee.Initialize(project=EE_PROJECT_ID)
+        print("✅ Earth Engine initialized successfully")
+    except ee.EEException as e:
+        if "Please authorize access" in str(e):
+            print("🔐 Earth Engine authentication required...")
+            print("Please run one of the following:")
+            print("  1. Command line: earthengine authenticate")
+            print("  2. Python: ee.Authenticate()")
+            print("\nTrying automatic authentication...")
+            try:
+                ee.Authenticate()
+                ee.Initialize(project=EE_PROJECT_ID)
+                print("✅ Earth Engine authenticated and initialized successfully")
+            except Exception as auth_error:
+                print(f"❌ Authentication failed: {auth_error}")
+                print("\nPlease run manually: earthengine authenticate")
+                raise
+        else:
+            print(f"❌ Earth Engine initialization failed: {e}")
+            raise
 
 def export_training_data(reference_data: ee.FeatureCollection, output_dir: str):
     """Export training data as CSV."""
@@ -466,6 +493,214 @@ def create_patch_geometries(aoi: ee.Geometry, patch_size: int, overlap: float = 
         print(f"Created {len(patch_geoms)} patch geometries (in degrees).")
         return patch_geoms
 
+def get_temporal_sentinel1_data(aoi: ee.Geometry, year: int, composite_method: str = 'median') -> ee.Image:
+    """
+    Get monthly Sentinel-1 composites for Paul's 2025 temporal modeling.
+    
+    Args:
+        aoi: Area of interest
+        year: Year for analysis
+        composite_method: 'median' or 'mean' for monthly composites
+        
+    Returns:
+        ee.Image: 24-band image (12 months × 2 polarizations)
+    """
+    print(f"Collecting monthly Sentinel-1 data for {year}...")
+    
+    monthly_bands = []
+    for month in range(1, 13):
+        # Get month date range
+        start_date = ee.Date.fromYMD(year, month, 1)
+        end_date = start_date.advance(1, 'month')
+        
+        # Filter Sentinel-1 data for this month
+        s1_monthly = ee.ImageCollection('COPERNICUS/S1_GRD') \
+            .filterDate(start_date, end_date) \
+            .filterBounds(aoi) \
+            .filter(ee.Filter.eq('instrumentMode', 'IW')) \
+            .filter(ee.Filter.eq('resolution_meters', 10)) \
+            .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV')) \
+            .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH')) \
+            .select(['VV', 'VH'])
+        
+        # Create monthly composite
+        if composite_method == 'median':
+            monthly_composite = s1_monthly.median()
+        else:
+            monthly_composite = s1_monthly.mean()
+        
+        # Rename bands with month suffix
+        monthly_composite = monthly_composite.select(
+            ['VV', 'VH'],
+            [f'S1_VV_M{month:02d}', f'S1_VH_M{month:02d}']
+        )
+        
+        monthly_bands.append(monthly_composite)
+        print(f"  Month {month:02d}: S1_VV_M{month:02d}, S1_VH_M{month:02d}")
+    
+    # Combine all monthly composites
+    temporal_s1 = monthly_bands[0]
+    for monthly_img in monthly_bands[1:]:
+        temporal_s1 = temporal_s1.addBands(monthly_img)
+    
+    temporal_s1 = temporal_s1.clip(aoi)
+    print(f"Created temporal S1 with {temporal_s1.bandNames().size().getInfo()} bands")
+    return temporal_s1
+
+def get_temporal_sentinel2_data(aoi: ee.Geometry, year: int, clouds_th: float, composite_method: str = 'median') -> ee.Image:
+    """
+    Get monthly Sentinel-2 composites for Paul's 2025 temporal modeling.
+    
+    Args:
+        aoi: Area of interest
+        year: Year for analysis  
+        clouds_th: Cloud threshold
+        composite_method: 'median' or 'mean' for monthly composites
+        
+    Returns:
+        ee.Image: 132-band image (12 months × 11 bands: 10 spectral + NDVI)
+    """
+    print(f"Collecting monthly Sentinel-2 data for {year}...")
+    
+    monthly_bands = []
+    for month in range(1, 13):
+        # Get month date range
+        start_date = ee.Date.fromYMD(year, month, 1)
+        end_date = start_date.advance(1, 'month')
+        
+        # Import Sentinel-2 data for this month
+        s2_monthly = ee.ImageCollection('COPERNICUS/S2_HARMONIZED') \
+            .filterDate(start_date, end_date) \
+            .filterBounds(aoi)
+        
+        # Get cloud probability data
+        s2_cloud_monthly = ee.ImageCollection('COPERNICUS/S2_CLOUD_PROBABILITY') \
+            .filterDate(start_date, end_date) \
+            .filterBounds(aoi)
+        
+        # Join cloud data
+        s2_monthly = ee.ImageCollection(s2_monthly) \
+            .map(lambda img: img.addBands(s2_cloud_monthly.filter(ee.Filter.equals('system:index', img.get('system:index'))).first()))
+        
+        # Cloud masking function
+        def maskClouds(img):
+            clouds = ee.Image(img).select('probability')
+            isNotCloud = clouds.lt(clouds_th)
+            return img.mask(isNotCloud)
+        
+        def maskEdges(s2_img):
+            return s2_img.updateMask(
+                s2_img.select('B8A').mask().updateMask(s2_img.select('B9').mask())
+            )
+        
+        # Apply masking and select bands
+        s2_monthly = s2_monthly.map(maskEdges).map(maskClouds)
+        s2_monthly = s2_monthly.select(['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12'])
+        
+        # Add NDVI
+        def add_ndvi(img):
+            ndvi = img.normalizedDifference(['B8', 'B4']).rename('NDVI')
+            return img.addBands([ndvi])
+        
+        s2_monthly = s2_monthly.map(add_ndvi)
+        
+        # Create monthly composite
+        if composite_method == 'median':
+            monthly_composite = s2_monthly.median()
+        else:
+            monthly_composite = s2_monthly.mean()
+        
+        # Rename bands with month suffix
+        original_bands = ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12', 'NDVI']
+        new_bands = [f'{band}_M{month:02d}' for band in original_bands]
+        monthly_composite = monthly_composite.select(original_bands, new_bands)
+        
+        monthly_bands.append(monthly_composite)
+        print(f"  Month {month:02d}: 11 bands (B2-B12, NDVI)")
+    
+    # Combine all monthly composites
+    temporal_s2 = monthly_bands[0]
+    for monthly_img in monthly_bands[1:]:
+        temporal_s2 = temporal_s2.addBands(monthly_img)
+    
+    temporal_s2 = temporal_s2.clip(aoi)
+    print(f"Created temporal S2 with {temporal_s2.bandNames().size().getInfo()} bands")
+    return temporal_s2
+
+def get_temporal_alos2_data(aoi: ee.Geometry, year: int, composite_method: str = 'median') -> ee.Image:
+    """
+    Get monthly ALOS-2 composites for Paul's 2025 temporal modeling.
+    
+    Args:
+        aoi: Area of interest
+        year: Year for analysis
+        composite_method: 'median' or 'mean' for monthly composites
+        
+    Returns:
+        ee.Image: 24-band image (12 months × 2 polarizations)
+    """
+    print(f"Collecting monthly ALOS-2 data for {year}...")
+    
+    monthly_bands = []
+    for month in range(1, 13):
+        # Get month date range  
+        start_date = ee.Date.fromYMD(year, month, 1)
+        end_date = start_date.advance(1, 'month')
+        
+        # Filter ALOS-2 data for this month
+        alos2_monthly = ee.ImageCollection("JAXA/ALOS/PALSAR-2/Level2_2/ScanSAR") \
+            .filterDate(start_date, end_date) \
+            .filterBounds(aoi)
+        
+        # Check if any data exists for this month
+        data_count = alos2_monthly.size()
+        
+        # Create monthly composite or use empty bands if no data
+        monthly_composite = ee.Algorithms.If(
+            data_count.gt(0),
+            ee.Algorithms.If(
+                ee.String(composite_method).equals('median'),
+                alos2_monthly.median(),
+                alos2_monthly.mean()
+            ),
+            # Create empty image with HH, HV bands if no data available
+            ee.Image.constant([0, 0]).rename(['HH', 'HV']).toFloat()
+        )
+        monthly_composite = ee.Image(monthly_composite)
+        
+        # Handle missing bands gracefully and rename
+        band_names = monthly_composite.bandNames()
+        
+        # Check for HH and HV bands, create if missing
+        hh_band = ee.Algorithms.If(
+            band_names.contains('HH'),
+            monthly_composite.select('HH'),
+            ee.Image.constant(0).rename('HH').toFloat()
+        )
+        hv_band = ee.Algorithms.If(
+            band_names.contains('HV'), 
+            monthly_composite.select('HV'),
+            ee.Image.constant(0).rename('HV').toFloat()
+        )
+        
+        # Combine and rename with month suffix
+        monthly_composite = ee.Image.cat([hh_band, hv_band]).rename([
+            f'ALOS2_HH_M{month:02d}', 
+            f'ALOS2_HV_M{month:02d}'
+        ])
+        
+        monthly_bands.append(monthly_composite)
+        print(f"  Month {month:02d}: ALOS2_HH_M{month:02d}, ALOS2_HV_M{month:02d}")
+    
+    # Combine all monthly composites
+    temporal_alos2 = monthly_bands[0]
+    for monthly_img in monthly_bands[1:]:
+        temporal_alos2 = temporal_alos2.addBands(monthly_img)
+    
+    temporal_alos2 = temporal_alos2.clip(aoi)
+    print(f"Created temporal ALOS2 with {temporal_alos2.bandNames().size().getInfo()} bands")
+    return temporal_alos2
+
 def main():
     """Main function to run the canopy height mapping process."""
     args = parse_args()
@@ -482,17 +717,32 @@ def main():
         for i, patch_geom in enumerate(patch_geoms):
             patch_id = f"patch{i:04d}"
             print(f"Processing {patch_id}")
+            
             # Collect satellite data for this patch
-            s1 = get_sentinel1_data(patch_geom, args.year, args.start_date, args.end_date).toFloat()
-            s2 = get_sentinel2_data(patch_geom, args.year, args.start_date, args.end_date, args.clouds_th).toFloat()
-            alos2 = get_alos2_data(patch_geom, args.year, args.start_date, args.end_date, include_texture=False, speckle_filter=False).toFloat()
-            # Only add ALOS2 bands that exist
+            if args.temporal_mode:
+                print("Using Paul's 2025 temporal compositing...")
+                print("Expected band counts: S1=24, S2=132, ALOS2=24, total temporal=180+other bands")
+                s1 = get_temporal_sentinel1_data(patch_geom, args.year, args.monthly_composite).toFloat()
+                s2 = get_temporal_sentinel2_data(patch_geom, args.year, args.clouds_th, args.monthly_composite).toFloat()
+                alos2 = get_temporal_alos2_data(patch_geom, args.year, args.monthly_composite).toFloat()
+            else:
+                print("Using original yearly median compositing...")
+                s1 = get_sentinel1_data(patch_geom, args.year, args.start_date, args.end_date).toFloat()
+                s2 = get_sentinel2_data(patch_geom, args.year, args.start_date, args.end_date, args.clouds_th).toFloat()
+                alos2 = get_alos2_data(patch_geom, args.year, args.start_date, args.end_date, include_texture=False, speckle_filter=False).toFloat()
+            # Add ALOS2 bands (handling temporal vs non-temporal mode)
             alos2_band_names = alos2.bandNames().getInfo()
             patch_data = s1.addBands(s2)
-            if 'ALOS2_HH' in alos2_band_names:
-                patch_data = patch_data.addBands(alos2.select('ALOS2_HH'))
-            if 'ALOS2_HV' in alos2_band_names:
-                patch_data = patch_data.addBands(alos2.select('ALOS2_HV'))
+            
+            if args.temporal_mode:
+                # In temporal mode, add all ALOS2 monthly bands
+                patch_data = patch_data.addBands(alos2)
+            else:
+                # In non-temporal mode, add only existing ALOS2 bands
+                if 'ALOS2_HH' in alos2_band_names:
+                    patch_data = patch_data.addBands(alos2.select('ALOS2_HH'))
+                if 'ALOS2_HV' in alos2_band_names:
+                    patch_data = patch_data.addBands(alos2.select('ALOS2_HV'))
             dem_data = get_dem_data(patch_geom).toFloat()
             canopy_ht = get_canopyht_data(patch_geom).toFloat()
             forest_mask = create_forest_mask(
@@ -533,8 +783,9 @@ def main():
             band_count = patch_data.bandNames().length()
             # Get geojson file name (without extension)
             geojson_name = os.path.splitext(os.path.basename(args.aoi))[0]
-            # Compose fileNamePrefix as requested
-            fileNamePrefix = f"{geojson_name}_bandNum{{}}_scale{args.scale}_{patch_id}".format(band_count.getInfo() if hasattr(band_count, 'getInfo') else band_count)
+            # Compose fileNamePrefix as requested, including temporal indicator
+            temporal_suffix = "_temporal" if args.temporal_mode else ""
+            fileNamePrefix = f"{geojson_name}{temporal_suffix}_bandNum{{}}_scale{args.scale}_{patch_id}".format(band_count.getInfo() if hasattr(band_count, 'getInfo') else band_count)
             if args.export_patches:
                 export_task = ee.batch.Export.image.toDrive(
                     image=patch_data,
@@ -553,12 +804,23 @@ def main():
     else:
         # Fallback: process whole AOI as before
         print("Processing whole AOI (not patch-based)...")
-        s1 = get_sentinel1_data(aoi_buffered, args.year, args.start_date, args.end_date).toFloat()
-        s2 = get_sentinel2_data(aoi_buffered, args.year, args.start_date, args.end_date, args.clouds_th).toFloat()
-        alos2 = get_alos2_data(aoi_buffered, args.year, args.start_date, args.end_date, include_texture=False, speckle_filter=False).toFloat()
-        # Only add ALOS2 bands that exist
-        alos2_band_names = alos2.bandNames().getInfo()
-        data = s1.addBands(s2).addBands(alos2)
+        
+        if args.temporal_mode:
+            print("Using Paul's 2025 temporal compositing...")
+            print("Expected band counts: S1=24, S2=132, ALOS2=24, total temporal=180+other bands")
+            s1 = get_temporal_sentinel1_data(aoi_buffered, args.year, args.monthly_composite).toFloat()
+            s2 = get_temporal_sentinel2_data(aoi_buffered, args.year, args.clouds_th, args.monthly_composite).toFloat()
+            alos2 = get_temporal_alos2_data(aoi_buffered, args.year, args.monthly_composite).toFloat()
+            # In temporal mode, add all bands
+            data = s1.addBands(s2).addBands(alos2)
+        else:
+            print("Using original yearly median compositing...")
+            s1 = get_sentinel1_data(aoi_buffered, args.year, args.start_date, args.end_date).toFloat()
+            s2 = get_sentinel2_data(aoi_buffered, args.year, args.start_date, args.end_date, args.clouds_th).toFloat()
+            alos2 = get_alos2_data(aoi_buffered, args.year, args.start_date, args.end_date, include_texture=False, speckle_filter=False).toFloat()
+            # Only add ALOS2 bands that exist
+            alos2_band_names = alos2.bandNames().getInfo()
+            data = s1.addBands(s2).addBands(alos2)
         dem_data = get_dem_data(aoi_buffered).toFloat()
         canopy_ht = get_canopyht_data(aoi_buffered).toFloat()
         forest_mask = create_forest_mask(

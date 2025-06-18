@@ -26,6 +26,11 @@ def parse_args():
                        help='Size of patches in meters (default: 2560)')
     parser.add_argument('--patch-overlap', type=float, default=0.1,
                        help='Overlap between patches (0.0 to 1.0)')
+    # Paul's 2025 temporal parameters
+    parser.add_argument('--temporal-mode', action='store_true',
+                       help='Enable Paul\'s 2025 temporal compositing (12-monthly data for S1/S2/ALOS2)')
+    parser.add_argument('--monthly-composite', type=str, default='median', choices=['median', 'mean'],
+                       help='Monthly composite method for temporal mode')
     return parser.parse_args()
 
 def get_gedi_dates(year, start_date, end_date):
@@ -50,6 +55,21 @@ def main(args):
 
     # Get GEDI dates from input arguments
     gedi_start_date, gedi_end_date = get_gedi_dates(args.year, args.start_date, args.end_date)
+    
+    # Print configuration summary
+    print(f"\n📊 CHM Processing Configuration:")
+    print(f"   Model: {args.model}")
+    print(f"   Patches: {'Enabled' if args.use_patches else 'Disabled'}")
+    print(f"   Temporal Mode: {'Paul\'s 2025 (12-monthly)' if args.temporal_mode else 'Original (yearly median)'}")
+    if args.temporal_mode:
+        print(f"   Expected bands: ~180+ (S1: 24, S2: 132, ALOS2: 24, others: ~5)")
+        print(f"   Monthly composite: {args.monthly_composite}")
+    else:
+        print(f"   Expected bands: ~31 (S1: 2, S2: 11, ALOS2: 2, others: ~16)")
+    print(f"   AOI: {args.aoi_path}")
+    print(f"   Year: {args.year}")
+    print(f"   Steps: {', '.join(args.steps)}")
+    print()
 
     # Build command for GEE model training and prediction
     # Always use RF for GEE processing since it's the only supported model
@@ -83,6 +103,13 @@ def main(args):
             '--patch-size', str(args.patch_size),
             '--patch-overlap', str(args.patch_overlap),
             '--export-patches',
+        ])
+
+    # Add temporal parameters if temporal mode is enabled
+    if args.temporal_mode:
+        gee_cmd.extend([
+            '--temporal-mode',
+            '--monthly-composite', args.monthly_composite,
         ])
 
     # Process each requested step
