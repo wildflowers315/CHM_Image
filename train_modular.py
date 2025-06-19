@@ -172,7 +172,9 @@ def find_pretrained_model(args):
         f"chm_outputs/{args.model}/predictions/final_model.pt",
         f"chm_outputs/{args.model}/predictions/final_model.pth",
         f"chm_outputs/{args.model}/final_model.pt",
-        f"chm_outputs/{args.model}/final_model.pth"
+        f"chm_outputs/{args.model}/final_model.pth",
+        f"chm_outputs/test_unified_{args.model}/{args.model}_model.pth",
+        f"chm_outputs/test_unified_{args.model}/{args.model}_model.pt"
     ]
     
     for model_path in model_search_paths:
@@ -395,12 +397,12 @@ def load_model_for_prediction(model_path: str, model_type: str, device: str = 'c
                     return output
             
             # Get input channels and base channels from checkpoint
+            input_channels = 31  # Default
+            base_channels = 64   # Default
+            
             if 'model_state_dict' in checkpoint:
                 state_dict = checkpoint['model_state_dict']
                 # Find first convolution layer to get input channels
-                input_channels = 31  # Default
-                base_channels = 64   # Default
-                
                 for key, tensor in state_dict.items():
                     if 'encoder1.0.weight' in key:
                         input_channels = tensor.shape[1]  # Input channels
@@ -410,8 +412,15 @@ def load_model_for_prediction(model_path: str, model_type: str, device: str = 'c
                 else:
                     print("⚠️  Could not detect architecture from checkpoint, using defaults")
             else:
-                input_channels = 31
-                base_channels = 64
+                # Try to get from direct checkpoint (not wrapped in model_state_dict)
+                for key, tensor in checkpoint.items():
+                    if 'encoder1.0.weight' in key:
+                        input_channels = tensor.shape[1]  # Input channels
+                        base_channels = tensor.shape[0]   # Base channels
+                        print(f"📊 Detected model architecture: {input_channels} input channels, {base_channels} base channels")
+                        break
+                else:
+                    print("⚠️  Could not detect architecture from checkpoint, using defaults")
             
             # Create model with correct architecture
             model = Height2DUNet(in_channels=input_channels, base_channels=base_channels)
