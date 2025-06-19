@@ -1362,7 +1362,423 @@ python -m pytest tests/test_enhanced_training.py -v
 - 🧪 **Regression Tests**: Ensure no performance degradation
 - 🧪 **Compatibility Tests**: Backward compatibility validation
 
-This enhanced training strategy transforms the current basic training into a robust, production-ready system with comprehensive data augmentation, proper validation, and enterprise-grade training persistence capabilities. 
+This enhanced training strategy transforms the current basic training into a robust, production-ready system with comprehensive data augmentation, proper validation, and enterprise-grade training persistence capabilities.
+
+---
+
+# 🚧 Phase 4: Code Refactoring - Modular Training System Architecture
+
+## Status: 🔄 IN PLANNING - Large Codebase Refactoring Initiative
+
+The current `train_predict_map.py` has grown to **3,179 lines**, making it difficult to maintain, debug, and extend. This refactoring phase will restructure the codebase into a modular, maintainable architecture while preserving all functionality.
+
+## 11. Current Codebase Analysis
+
+### 11.1 File Size and Complexity Issues
+
+#### 📊 Current State Analysis
+- **Primary File**: `train_predict_map.py` - 3,179 lines
+- **Monolithic Design**: Single file contains all functionality
+- **Mixed Responsibilities**: Training, data loading, models, evaluation, CLI
+- **Code Duplication**: Similar patterns repeated across model types
+- **Testing Challenges**: Large file makes unit testing difficult
+- **Maintenance Issues**: Changes require navigating thousands of lines
+
+#### 🧩 Content Breakdown (Estimated)
+```python
+# Current train_predict_map.py structure analysis:
+Lines 1-50:      Imports and basic setup
+Lines 51-200:    2D U-Net model definition  
+Lines 201-400:   Enhanced training classes (AugmentedPatchDataset, EarlyStoppingCallback, etc.)
+Lines 401-600:   TrainingLogger and EnhancedUNetTrainer
+Lines 601-800:   Data loading and normalization functions
+Lines 801-1200:  Traditional model training (RF, MLP)
+Lines 1201-1600: 2D U-Net training functions
+Lines 1601-2000: 3D U-Net training functions  
+Lines 2001-2400: Multi-patch training workflows
+Lines 2401-2800: Prediction generation and merging
+Lines 2801-3179: CLI argument parsing and main execution
+```
+
+### 11.2 Refactoring Strategy
+
+#### 🎯 Core Objectives
+1. **Modularity**: Break down into logical, focused modules
+2. **Maintainability**: Each module has single responsibility
+3. **Testability**: Enable comprehensive unit testing
+4. **Extensibility**: Easy to add new models and features
+5. **Performance**: No degradation in functionality or speed
+6. **Backward Compatibility**: All existing workflows continue to work
+
+#### 🏗️ Proposed Modular Architecture
+
+```python
+# 🔄 PLANNED: New modular structure
+
+training/
+├── __init__.py                    # Training package exports
+├── core/                          # Core training infrastructure
+│   ├── __init__.py
+│   ├── trainer_base.py           # Abstract base trainer class
+│   ├── early_stopping.py        # EarlyStoppingCallback
+│   ├── logging.py                # TrainingLogger
+│   └── metrics.py                # Training metrics utilities
+├── data/                          # Data handling and augmentation
+│   ├── __init__.py
+│   ├── augmentation.py           # AugmentedPatchDataset
+│   ├── loaders.py                # Data loading utilities
+│   └── preprocessing.py          # Data preprocessing functions
+├── models/                        # Model-specific trainers
+│   ├── __init__.py
+│   ├── unet_trainer.py           # EnhancedUNetTrainer
+│   ├── traditional_trainer.py   # RF/MLP trainer
+│   └── model_factory.py          # Model creation utilities
+└── workflows/                     # High-level training workflows
+    ├── __init__.py
+    ├── single_patch.py           # Single patch training
+    ├── multi_patch.py            # Multi-patch training
+    └── evaluation.py             # Training evaluation
+
+models/
+├── __init__.py                    # Model package exports
+├── architectures/                 # Model architectures
+│   ├── __init__.py
+│   ├── unet_2d.py                # Height2DUNet
+│   ├── unet_3d.py                # Height3DUNet (move from models/3d_unet.py)
+│   └── traditional.py            # RF/MLP model utilities
+└── losses/                        # Loss functions
+    ├── __init__.py
+    ├── huber.py                  # Modified Huber loss
+    └── utils.py                  # Loss utilities
+
+utils/
+├── __init__.py                    # Utility package exports
+├── data_utils.py                 # Data loading and processing utilities
+├── prediction_utils.py           # Prediction generation utilities
+├── cli_utils.py                  # CLI argument parsing helpers
+└── validation_utils.py           # Validation and testing utilities
+
+# Simplified main files
+train_predict_map.py              # Streamlined main CLI entry point (~200 lines)
+evaluate_predictions.py           # Enhanced evaluation (already refactored)
+```
+
+### 11.3 Detailed Refactoring Plan
+
+#### 🔄 Phase 1: Core Infrastructure Extraction (Week 1)
+
+**New Files to Create:**
+
+1. **`training/core/trainer_base.py`**
+```python
+# 🔄 PLANNED: Abstract base class for all trainers
+from abc import ABC, abstractmethod
+from typing import Dict, Any, List, Optional
+
+class BaseTrainer(ABC):
+    """Abstract base class for all model trainers"""
+    
+    def __init__(self, model_type: str, device: str = "auto"):
+        self.model_type = model_type
+        self.device = self._setup_device(device)
+        
+    @abstractmethod
+    def train(self, **kwargs) -> Dict[str, Any]:
+        """Train the model and return results"""
+        pass
+        
+    @abstractmethod
+    def predict(self, **kwargs) -> Any:
+        """Generate predictions using trained model"""
+        pass
+        
+    def _setup_device(self, device: str):
+        """Setup computing device"""
+        pass
+```
+
+2. **`training/core/early_stopping.py`**
+```python
+# 🔄 PLANNED: Extract EarlyStoppingCallback
+# Move EarlyStoppingCallback class from train_predict_map.py
+# Add comprehensive unit tests
+# Enhance with additional stopping criteria
+```
+
+3. **`training/core/logging.py`**
+```python
+# 🔄 PLANNED: Extract TrainingLogger
+# Move TrainingLogger class from train_predict_map.py
+# Add support for different logging backends
+# Integrate with popular logging frameworks
+```
+
+4. **`training/data/augmentation.py`**
+```python
+# 🔄 PLANNED: Extract AugmentedPatchDataset
+# Move AugmentedPatchDataset class from train_predict_map.py
+# Add more augmentation strategies
+# Optimize memory usage for large datasets
+```
+
+#### 🔄 Phase 2: Model Architecture Separation (Week 2)
+
+**Architectural Reorganization:**
+
+1. **`models/architectures/unet_2d.py`**
+```python
+# 🔄 PLANNED: Extract Height2DUNet
+# Move Height2DUNet class from train_predict_map.py
+# Add architectural variants (ResNet backbone, Attention U-Net)
+# Optimize for different input sizes
+```
+
+2. **`models/architectures/unet_3d.py`**
+```python
+# 🔄 PLANNED: Reorganize 3D U-Net
+# Move from models/3d_unet.py to new location
+# Clean up and optimize implementation
+# Add proper documentation and examples
+```
+
+3. **`models/losses/huber.py`**
+```python
+# 🔄 PLANNED: Extract loss functions
+# Move modified_huber_loss from train_predict_map.py
+# Add other specialized loss functions
+# Create loss function factory
+```
+
+4. **`training/models/unet_trainer.py`**
+```python
+# 🔄 PLANNED: Extract EnhancedUNetTrainer
+# Move EnhancedUNetTrainer class from train_predict_map.py
+# Inherit from BaseTrainer
+# Add specific U-Net optimizations
+```
+
+#### 🔄 Phase 3: Workflow Modularization (Week 3)
+
+**Workflow Separation:**
+
+1. **`training/workflows/single_patch.py`**
+```python
+# 🔄 PLANNED: Single patch training workflow
+def train_single_patch(args):
+    """Handle single patch training workflow"""
+    # Extract logic from current main() function
+    # Implement using modular components
+    # Add comprehensive error handling
+```
+
+2. **`training/workflows/multi_patch.py`**
+```python
+# 🔄 PLANNED: Multi-patch training workflow
+def train_multi_patch(args):
+    """Handle multi-patch training workflow"""
+    # Extract logic from current train_multi_patch() function
+    # Use enhanced training components
+    # Add progress monitoring
+```
+
+3. **`utils/cli_utils.py`**
+```python
+# 🔄 PLANNED: CLI utilities
+def create_argument_parser():
+    """Create and configure argument parser"""
+    # Extract argument parsing from main file
+    # Organize into logical groups
+    # Add validation and help text
+```
+
+#### 🔄 Phase 4: Integration and Optimization (Week 4)
+
+**Final Integration:**
+
+1. **Streamlined `train_predict_map.py`**
+```python
+# 🔄 PLANNED: New streamlined main file (~200 lines)
+#!/usr/bin/env python3
+"""
+Unified Patch-Based Canopy Height Model Training and Prediction
+
+Streamlined main entry point using modular training system.
+"""
+
+from training.workflows import single_patch, multi_patch
+from utils.cli_utils import create_argument_parser
+from training.core.logging import setup_logging
+
+def main():
+    """Main entry point for training system"""
+    parser = create_argument_parser()
+    args = parser.parse_args()
+    
+    # Setup logging
+    logger = setup_logging(args.output_dir, args.verbose)
+    
+    # Route to appropriate workflow
+    if args.patch_path:
+        results = single_patch.train(args)
+    elif args.patch_dir or args.patch_files:
+        results = multi_patch.train(args)
+    else:
+        parser.error("Must specify input patches")
+    
+    logger.info(f"Training completed: {results}")
+
+if __name__ == "__main__":
+    main()
+```
+
+### 11.4 Migration Strategy
+
+#### 🔄 Backward Compatibility Preservation
+
+```python
+# 🔄 PLANNED: Compatibility layer
+# Create compatibility imports in main modules
+# Ensure all existing scripts continue to work
+# Add deprecation warnings for old interfaces
+
+# Example: training/__init__.py
+from .core.trainer_base import BaseTrainer
+from .models.unet_trainer import EnhancedUNetTrainer
+from .data.augmentation import AugmentedPatchDataset
+
+# Backward compatibility (deprecated)
+import warnings
+
+def deprecated_function(*args, **kwargs):
+    warnings.warn("This function is deprecated. Use new modular API.", 
+                  DeprecationWarning, stacklevel=2)
+    # Redirect to new implementation
+```
+
+#### 📋 Migration Checklist
+
+**Functional Validation:**
+- [ ] All existing CLI commands work unchanged
+- [ ] Training results are identical to pre-refactoring
+- [ ] Model performance is preserved
+- [ ] Memory usage is not increased
+- [ ] Training speed is maintained or improved
+
+**Code Quality Improvements:**
+- [ ] Each module has <500 lines
+- [ ] Comprehensive unit tests for all modules
+- [ ] Clear documentation and examples
+- [ ] Type hints throughout codebase
+- [ ] Consistent code style and formatting
+
+**Testing Strategy:**
+- [ ] Unit tests for each new module
+- [ ] Integration tests for workflows
+- [ ] Performance regression tests
+- [ ] Backward compatibility tests
+- [ ] Full end-to-end validation
+
+### 11.5 Benefits of Refactoring
+
+#### 🎯 Immediate Benefits
+
+**Developer Experience:**
+- **Faster Navigation**: Find relevant code quickly
+- **Easier Debugging**: Isolate issues to specific modules
+- **Simpler Testing**: Test individual components
+- **Clearer Ownership**: Each module has specific responsibility
+
+**Code Quality:**
+- **Reduced Complexity**: Each file focuses on single concern
+- **Better Documentation**: Module-specific documentation
+- **Easier Review**: Smaller, focused pull requests
+- **Consistent Patterns**: Standardized interfaces across modules
+
+#### 🎯 Long-term Benefits
+
+**Maintainability:**
+- **Feature Addition**: Add new models without touching existing code
+- **Bug Fixes**: Isolate and fix issues in specific modules
+- **Performance Optimization**: Optimize individual components
+- **Refactoring**: Easy to modify specific functionality
+
+**Extensibility:**
+- **Plugin Architecture**: Easy to add new model types
+- **Custom Workflows**: Create specialized training pipelines
+- **Third-party Integration**: Clean APIs for external tools
+- **Experimentation**: Safe to try new approaches
+
+### 11.6 Implementation Timeline
+
+#### 🗓️ 4-Week Refactoring Schedule
+
+**Week 1: Foundation**
+- [ ] Create new package structure
+- [ ] Extract core training infrastructure
+- [ ] Implement BaseTrainer abstract class
+- [ ] Move logging and early stopping components
+
+**Week 2: Models and Data**
+- [ ] Separate model architectures
+- [ ] Extract data augmentation classes
+- [ ] Reorganize loss functions
+- [ ] Create model factories
+
+**Week 3: Workflows**
+- [ ] Extract training workflows
+- [ ] Modularize CLI handling
+- [ ] Create utility modules
+- [ ] Implement compatibility layer
+
+**Week 4: Integration**
+- [ ] Create streamlined main file
+- [ ] Comprehensive testing
+- [ ] Documentation updates
+- [ ] Performance validation
+
+### 11.7 Risk Mitigation
+
+#### ⚠️ Potential Risks and Mitigation
+
+**Functional Regressions:**
+- **Risk**: Training behavior changes after refactoring
+- **Mitigation**: Comprehensive regression testing with identical inputs/outputs
+
+**Performance Degradation:**
+- **Risk**: Module imports add overhead
+- **Mitigation**: Performance benchmarking before/after refactoring
+
+**Compatibility Issues:**
+- **Risk**: Existing scripts break
+- **Mitigation**: Maintain compatibility layer and thorough testing
+
+**Integration Complexity:**
+- **Risk**: Modules don't integrate properly
+- **Mitigation**: Incremental refactoring with continuous testing
+
+### 11.8 Success Metrics
+
+#### 📊 Refactoring Success Criteria
+
+**Code Quality Metrics:**
+- [ ] No single file exceeds 500 lines
+- [ ] Test coverage >90% for all new modules
+- [ ] All modules have comprehensive documentation
+- [ ] Zero performance regression in training speed
+
+**Functional Metrics:**
+- [ ] 100% backward compatibility maintained
+- [ ] All existing CLI commands work identically
+- [ ] Training results are numerically identical
+- [ ] Memory usage remains constant or improves
+
+**Developer Experience:**
+- [ ] New features can be added without modifying existing modules
+- [ ] Bug fixes are isolated to relevant modules
+- [ ] Code review time reduced by >50%
+- [ ] Developer onboarding time reduced
+
+This refactoring initiative will transform the current monolithic training system into a modern, modular architecture that is easier to maintain, test, and extend while preserving all existing functionality and performance characteristics. 
 
 
 

@@ -265,10 +265,10 @@ class AugmentedPatchDataset(Dataset):
         # Ensure 256x256 dimensions for U-Net compatibility
         features, target, mask = self._ensure_256x256(features, target, mask)
         
-        # Convert to tensors
-        features_tensor = torch.FloatTensor(features)
-        target_tensor = torch.FloatTensor(target)
-        mask_tensor = torch.BoolTensor(mask)
+        # Convert to tensors with positive strides (fix for negative stride error)
+        features_tensor = torch.FloatTensor(features.copy())
+        target_tensor = torch.FloatTensor(target.copy())
+        mask_tensor = torch.BoolTensor(mask.copy())
         
         return features_tensor, target_tensor, mask_tensor
     
@@ -297,34 +297,34 @@ class AugmentedPatchDataset(Dataset):
         flip_id = (augment_id - 1) % 3 + 1  # 1, 2, 3
         rotation_id = (augment_id - 1) // 3  # 0, 1, 2, 3
         
-        # Apply flips
+        # Apply flips using np.flip to avoid negative strides
         if flip_id == 1:  # Horizontal flip
             if len(features.shape) == 3:  # (C, H, W)
-                features = features[:, :, ::-1]
+                features = np.flip(features, axis=2).copy()
             else:  # (C, T, H, W)
-                features = features[:, :, :, ::-1]
-            target = target[:, ::-1]
+                features = np.flip(features, axis=3).copy()
+            target = np.flip(target, axis=1).copy()
         elif flip_id == 2:  # Vertical flip
             if len(features.shape) == 3:  # (C, H, W)
-                features = features[:, ::-1, :]
+                features = np.flip(features, axis=1).copy()
             else:  # (C, T, H, W)
-                features = features[:, :, ::-1, :]
-            target = target[::-1, :]
+                features = np.flip(features, axis=2).copy()
+            target = np.flip(target, axis=0).copy()
         elif flip_id == 3:  # Both flips
             if len(features.shape) == 3:  # (C, H, W)
-                features = features[:, ::-1, ::-1]
+                features = np.flip(features, axis=(1, 2)).copy()
             else:  # (C, T, H, W)
-                features = features[:, :, ::-1, ::-1]
-            target = target[::-1, ::-1]
+                features = np.flip(features, axis=(2, 3)).copy()
+            target = np.flip(target, axis=(0, 1)).copy()
         
         # Apply rotations (k * 90 degrees)
         if rotation_id > 0:
             for _ in range(rotation_id):
                 if len(features.shape) == 3:  # (C, H, W)
-                    features = np.rot90(features, axes=(1, 2))
+                    features = np.rot90(features, axes=(1, 2)).copy()
                 else:  # (C, T, H, W)
-                    features = np.rot90(features, axes=(2, 3))
-                target = np.rot90(target)
+                    features = np.rot90(features, axes=(2, 3)).copy()
+                target = np.rot90(target).copy()
         
         return features, target
     
