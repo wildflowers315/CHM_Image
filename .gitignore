@@ -53,3 +53,5 @@ chm_env/*
 chm_env*
 
 test_*
+
+tmp/*

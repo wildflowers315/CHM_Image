@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-Modular training entry point - replacement for train_predict_map.py
-
-This provides a clean, modular interface that delegates to the fixed train_predict_map.py
-while the full modular system is being completed.
+Simplified modular training script that works with existing code.
+This bridges the gap while the full modular system is being completed.
 """
 
 import argparse
@@ -11,11 +9,10 @@ import sys
 import os
 from pathlib import Path
 
-
 def create_parser():
     """Create command line argument parser."""
     parser = argparse.ArgumentParser(
-        description="Modular CHM training system",
+        description="Simplified modular CHM training system",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
@@ -56,69 +53,22 @@ def create_parser():
     parser.add_argument('--early-stopping-patience', type=int, default=10,
                         help='Early stopping patience')
     
-    # Random Forest specific
-    parser.add_argument('--n-estimators', type=int, default=100,
-                        help='Number of trees for Random Forest')
-    parser.add_argument('--max-depth', type=int, default=None,
-                        help='Maximum depth for Random Forest')
-    
-    # MLP specific  
-    parser.add_argument('--hidden-sizes', nargs='+', type=int, default=[512, 256, 128],
-                        help='Hidden layer sizes for MLP')
-    parser.add_argument('--dropout-rate', type=float, default=0.2,
-                        help='Dropout rate for MLP')
-    
-    # U-Net specific
-    parser.add_argument('--base-channels', type=int, default=None,
-                        help='Base channels for U-Net (auto-selected if not specified)')
-    
     # Actions
     parser.add_argument('--generate-prediction', action='store_true',
                         help='Generate predictions after training')
-    parser.add_argument('--evaluate-model', action='store_true', 
-                        help='Evaluate model after training')
     
     return parser
-
-
-def get_model_defaults(model_type: str) -> dict:
-    """Get default parameters for each model type."""
-    defaults = {
-        'rf': {
-            'batch_size': 1024,
-            'epochs': 1,  # RF trains in one pass
-        },
-        'mlp': {
-            'batch_size': 512,
-            'epochs': 100,
-            'learning_rate': 0.001,
-        },
-        '2d_unet': {
-            'batch_size': 8,
-            'epochs': 50,
-            'learning_rate': 0.001,
-            'base_channels': 64,
-        },
-        '3d_unet': {
-            'batch_size': 4,
-            'epochs': 30,
-            'learning_rate': 0.0005,
-            'base_channels': 32,
-        }
-    }
-    return defaults.get(model_type, {})
-
 
 def construct_original_command(args):
     """Construct command for the original train_predict_map.py script."""
     cmd_parts = ['python', 'train_predict_map.py']
     
     # Required arguments
-    cmd_parts.extend(['--patch-path', f'"{args.patch_path}"'])
+    cmd_parts.extend(['--patch-path', args.patch_path])
     cmd_parts.extend(['--model', args.model])
-    cmd_parts.extend(['--output-dir', f'"{os.path.join(args.output_dir, args.model, "predictions")}"'])
+    cmd_parts.extend(['--output-dir', os.path.join(args.output_dir, args.model, 'predictions')])
     
-    # Always use enhanced training (it's now fixed for negative stride issues)
+    # Always use enhanced training (it's now fixed)
     cmd_parts.append('--use-enhanced-training')
     
     # Optional arguments
@@ -143,40 +93,25 @@ def construct_original_command(args):
     if args.generate_prediction:
         cmd_parts.append('--generate-prediction')
     
-    # Handle model-specific parameters
-    if args.model == 'rf':
-        if args.n_estimators != 100:
-            cmd_parts.extend(['--n-estimators', str(args.n_estimators)])
-        if args.max_depth:
-            cmd_parts.extend(['--max-depth', str(args.max_depth)])
-    elif args.model == 'mlp':
-        if args.hidden_sizes != [512, 256, 128]:
-            cmd_parts.extend(['--hidden-sizes'] + [str(x) for x in args.hidden_sizes])
-        if args.dropout_rate != 0.2:
-            cmd_parts.extend(['--dropout-rate', str(args.dropout_rate)])
-    elif args.model in ['2d_unet', '3d_unet']:
-        if args.base_channels:
-            cmd_parts.extend(['--base-channels', str(args.base_channels)])
+    # Set device if not auto
+    if args.device != 'auto':
+        if args.device == 'cuda':
+            os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+        elif args.device == 'cpu':
+            os.environ['CUDA_VISIBLE_DEVICES'] = ''
     
     return cmd_parts
 
-
 def main():
-    """Main training function that delegates to the fixed train_predict_map.py."""
+    """Main function that delegates to the original script."""
     parser = create_parser()
     args = parser.parse_args()
     
-    # Apply model-specific defaults
-    model_defaults = get_model_defaults(args.model)
-    for key, value in model_defaults.items():
-        if getattr(args, key, None) is None:
-            setattr(args, key, value)
-    
-    print("🚀 Starting modular CHM training system")
+    print("🚀 Starting simplified modular CHM training system")
     print(f"Model: {args.model}")
     print(f"Data source: {args.patch_path}")
     print(f"Output directory: {args.output_dir}/{args.model}")
-    print("📝 Delegating to fixed train_predict_map.py (negative stride issue resolved)...")
+    print("📝 Delegating to fixed train_predict_map.py...")
     print()
     
     # Construct and execute command
@@ -186,12 +121,6 @@ def main():
     print(f"Executing: {cmd_str}")
     print("=" * 80)
     
-    # Set device environment variables if needed
-    if args.device == 'cpu':
-        os.environ['CUDA_VISIBLE_DEVICES'] = ''
-    elif args.device == 'cuda':
-        os.environ['CUDA_VISIBLE_DEVICES'] = '0'
-    
     # Execute the command
     exit_code = os.system(cmd_str)
     
@@ -199,11 +128,9 @@ def main():
     if exit_code == 0:
         print("✅ Training completed successfully!")
         print(f"📁 Outputs saved to: {args.output_dir}/{args.model}/")
-        print("💡 Note: Full modular architecture is available in training/ package")
     else:
         print("❌ Training failed!")
         sys.exit(exit_code)
-
 
 if __name__ == "__main__":
     main()

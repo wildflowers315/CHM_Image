@@ -7,6 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### activate chm_env python environment
 source chm_env/bin/activate 
 
+* when create temporaly file, use tmp folder
+
 ### Testing
 ```bash
 # Run all tests
