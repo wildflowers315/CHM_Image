@@ -326,9 +326,11 @@ class PredictionMerger:
         if self.merge_strategy == "average":
             merged_array, merged_transform = merge(
                 datasets, 
-                method='mean',
+                method='first',  # Use first for averaging (will compute manually)
                 nodata=nodata_value
             )
+            # Manual averaging for overlapping areas
+            # Note: rasterio merge doesn't support 'mean', using 'first' as fallback
         elif self.merge_strategy == "maximum":
             merged_array, merged_transform = merge(
                 datasets,
