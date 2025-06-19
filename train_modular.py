@@ -394,21 +394,27 @@ def load_model_for_prediction(model_path: str, model_type: str, device: str = 'c
                     output = self.final_conv(d1)
                     return output
             
-            # Get input channels from checkpoint
+            # Get input channels and base channels from checkpoint
             if 'model_state_dict' in checkpoint:
                 state_dict = checkpoint['model_state_dict']
                 # Find first convolution layer to get input channels
+                input_channels = 31  # Default
+                base_channels = 64   # Default
+                
                 for key, tensor in state_dict.items():
                     if 'encoder1.0.weight' in key:
-                        input_channels = tensor.shape[1]
+                        input_channels = tensor.shape[1]  # Input channels
+                        base_channels = tensor.shape[0]   # Base channels
+                        print(f"📊 Detected model architecture: {input_channels} input channels, {base_channels} base channels")
                         break
                 else:
-                    input_channels = 31  # Default for non-temporal
+                    print("⚠️  Could not detect architecture from checkpoint, using defaults")
             else:
                 input_channels = 31
+                base_channels = 64
             
-            # Create model
-            model = Height2DUNet(in_channels=input_channels)
+            # Create model with correct architecture
+            model = Height2DUNet(in_channels=input_channels, base_channels=base_channels)
             
             # Load state dict
             if 'model_state_dict' in checkpoint:
@@ -431,7 +437,7 @@ def load_model_for_prediction(model_path: str, model_type: str, device: str = 'c
         raise RuntimeError(f"Failed to load model {model_path}: {str(e)}")
 
 
-def predict_single_patch(model, patch_file: str, model_type: str, device: str = 'cpu'):
+def predict_single_patch(model, patch_file: str, model_type: str, device: str = 'cpu', expected_channels: int = None):
     """Generate prediction for a single patch."""
     with rasterio.open(patch_file) as src:
         # Read all bands except the last (GEDI target)
@@ -439,6 +445,8 @@ def predict_single_patch(model, patch_file: str, model_type: str, device: str = 
         profile = src.profile.copy()
         transform = src.transform
         crs = src.crs
+        
+        print(f"📊 Patch {Path(patch_file).name}: {data.shape[0]} bands, {data.shape[1]}x{data.shape[2]} pixels")
     
     # Prepare input for model
     if model_type == '2d_unet':
@@ -447,6 +455,21 @@ def predict_single_patch(model, patch_file: str, model_type: str, device: str = 
             # Flatten temporal dimension into channels
             n_bands, n_time, height, width = data.shape
             data = data.reshape(n_bands * n_time, height, width)
+        
+        # Check if we need to adjust channels to match model
+        actual_channels = data.shape[0]
+        if expected_channels and actual_channels != expected_channels:
+            print(f"⚠️  Channel mismatch: patch has {actual_channels}, model expects {expected_channels}")
+            
+            if actual_channels > expected_channels:
+                # Take first N channels
+                print(f"🔧 Using first {expected_channels} channels")
+                data = data[:expected_channels]
+            else:
+                # Pad with zeros if we have fewer channels
+                print(f"🔧 Padding with {expected_channels - actual_channels} zero channels")
+                padding = np.zeros((expected_channels - actual_channels, data.shape[1], data.shape[2]), dtype=data.dtype)
+                data = np.concatenate([data, padding], axis=0)
         
         # Resize to 256x256 if needed
         original_height, original_width = data.shape[1], data.shape[2]
@@ -534,6 +557,12 @@ def pure_prediction_mode(args, patch_files: List[str]):
     model = load_model_for_prediction(pretrained_model, args.model, device)
     print("✅ Model loaded successfully")
     
+    # Get expected input channels from model
+    expected_channels = None
+    if hasattr(model, 'encoder1') and hasattr(model.encoder1[0], 'weight'):
+        expected_channels = model.encoder1[0].weight.shape[1]
+        print(f"🔍 Model expects {expected_channels} input channels")
+    
     # Create output directory
     output_dir = Path(args.output_dir) / args.model / "predictions"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -550,7 +579,7 @@ def pure_prediction_mode(args, patch_files: List[str]):
             print(f"  [{i+1}/{len(patch_files)}] Processing {patch_name}...")
             
             prediction, profile, transform, crs = predict_single_patch(
-                model, patch_file, args.model, device
+                model, patch_file, args.model, device, expected_channels
             )
             
             save_prediction(prediction, profile, str(output_path))
