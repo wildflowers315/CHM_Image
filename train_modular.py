@@ -37,7 +37,7 @@ def create_parser():
     
     # Pretrained model
     parser.add_argument('--pretrained-model', type=str, default=None,
-                        help='Path to pretrained model for prediction-only mode')
+                        help='Path to pretrained model for prediction-only mode (e.g., final_model.pt or final_model.pth)')
     
     # Output options
     parser.add_argument('--output-dir', default='chm_outputs',
@@ -321,12 +321,78 @@ def construct_original_command(args):
 def load_model_for_prediction(model_path: str, model_type: str, device: str = 'cpu'):
     """Load trained model for prediction."""
     try:
+        # Load checkpoint first to get architecture info
+        checkpoint = torch.load(model_path, map_location=device)
+        
         if model_type == '2d_unet':
-            # Import 2D U-Net model class
-            exec(open('train_predict_map.py').read(), globals())
-            
-            # Load checkpoint
-            checkpoint = torch.load(model_path, map_location=device)
+            # Define 2D U-Net model class directly (avoiding exec issues)
+            class Height2DUNet(torch.nn.Module):
+                """2D U-Net for canopy height prediction from non-temporal patches."""
+                
+                def __init__(self, in_channels, n_classes=1, base_channels=64):
+                    super().__init__()
+                    
+                    # Encoder
+                    self.encoder1 = self.conv_block(in_channels, base_channels)
+                    self.encoder2 = self.conv_block(base_channels, base_channels * 2)
+                    self.encoder3 = self.conv_block(base_channels * 2, base_channels * 4)
+                    self.encoder4 = self.conv_block(base_channels * 4, base_channels * 8)
+                    
+                    # Bottleneck
+                    self.bottleneck = self.conv_block(base_channels * 8, base_channels * 16)
+                    
+                    # Decoder
+                    self.decoder4 = self.upconv_block(base_channels * 16, base_channels * 8)
+                    self.decoder3 = self.upconv_block(base_channels * 16, base_channels * 4)
+                    self.decoder2 = self.upconv_block(base_channels * 8, base_channels * 2)
+                    self.decoder1 = self.upconv_block(base_channels * 4, base_channels)
+                    
+                    # Final prediction
+                    self.final_conv = torch.nn.Conv2d(base_channels, n_classes, kernel_size=1)
+                
+                def conv_block(self, in_channels, out_channels):
+                    return torch.nn.Sequential(
+                        torch.nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+                        torch.nn.BatchNorm2d(out_channels),
+                        torch.nn.ReLU(inplace=True),
+                        torch.nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+                        torch.nn.BatchNorm2d(out_channels),
+                        torch.nn.ReLU(inplace=True)
+                    )
+                
+                def upconv_block(self, in_channels, out_channels):
+                    return torch.nn.Sequential(
+                        torch.nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2),
+                        torch.nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+                        torch.nn.BatchNorm2d(out_channels),
+                        torch.nn.ReLU(inplace=True)
+                    )
+                
+                def forward(self, x):
+                    # Encoder
+                    e1 = self.encoder1(x)
+                    e2 = self.encoder2(torch.nn.MaxPool2d(2)(e1))
+                    e3 = self.encoder3(torch.nn.MaxPool2d(2)(e2))
+                    e4 = self.encoder4(torch.nn.MaxPool2d(2)(e3))
+                    
+                    # Bottleneck
+                    bottleneck = self.bottleneck(torch.nn.MaxPool2d(2)(e4))
+                    
+                    # Decoder
+                    d4 = self.decoder4(bottleneck)
+                    d4 = torch.cat([d4, e4], dim=1)
+                    
+                    d3 = self.decoder3(d4)
+                    d3 = torch.cat([d3, e3], dim=1)
+                    
+                    d2 = self.decoder2(d3)
+                    d2 = torch.cat([d2, e2], dim=1)
+                    
+                    d1 = self.decoder1(d2)
+                    d1 = torch.cat([d1, e1], dim=1)
+                    
+                    output = self.final_conv(d1)
+                    return output
             
             # Get input channels from checkpoint
             if 'model_state_dict' in checkpoint:
@@ -351,31 +417,9 @@ def load_model_for_prediction(model_path: str, model_type: str, device: str = 'c
                 model.load_state_dict(checkpoint)
                 
         elif model_type == '3d_unet':
-            # Import 3D U-Net model class
-            exec(open('models/3d_unet.py').read(), globals())
+            # For 3D U-Net, we'll delegate to the original script for now
+            raise ValueError("3D U-Net prediction not yet implemented in pure modular mode. Use --mode train_predict instead.")
             
-            checkpoint = torch.load(model_path, map_location=device)
-            
-            # Get input channels
-            if 'model_state_dict' in checkpoint:
-                state_dict = checkpoint['model_state_dict']
-                # Look for first conv layer weight
-                for key, tensor in state_dict.items():
-                    if 'encoder1.0.weight' in key:
-                        input_channels = tensor.shape[2]  # For 3D conv: (out, in, d, h, w)
-                        break
-                else:
-                    input_channels = 16  # Default for temporal
-            else:
-                input_channels = 16
-            
-            model = Height3DUNet(in_channels=input_channels)
-            
-            # Load state dict
-            if 'model_state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['model_state_dict'])
-            else:
-                model.load_state_dict(checkpoint)
         else:
             raise ValueError(f"Prediction mode not implemented for {model_type}")
         
