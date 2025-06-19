@@ -37,6 +37,82 @@ except (ImportError, FileNotFoundError):
         raise ImportError("3D U-Net not available")
     def create_3d_unet(*args, **kwargs):
         raise ImportError("3D U-Net not available")
+
+# 2D U-Net Model for non-temporal data
+class Height2DUNet(nn.Module):
+    """2D U-Net for canopy height prediction from non-temporal patches."""
+    
+    def __init__(self, in_channels, n_classes=1, base_channels=64):
+        super().__init__()
+        
+        # Encoder
+        self.encoder1 = self.conv_block(in_channels, base_channels)
+        self.encoder2 = self.conv_block(base_channels, base_channels * 2)
+        self.encoder3 = self.conv_block(base_channels * 2, base_channels * 4)
+        self.encoder4 = self.conv_block(base_channels * 4, base_channels * 8)
+        
+        # Bottleneck
+        self.bottleneck = self.conv_block(base_channels * 8, base_channels * 16)
+        
+        # Decoder
+        self.decoder4 = self.upconv_block(base_channels * 16, base_channels * 8)
+        self.decoder3 = self.upconv_block(base_channels * 16, base_channels * 4)  # 16 = 8 + 8 from skip
+        self.decoder2 = self.upconv_block(base_channels * 8, base_channels * 2)   # 8 = 4 + 4 from skip
+        self.decoder1 = self.upconv_block(base_channels * 4, base_channels)       # 4 = 2 + 2 from skip
+        
+        # Final prediction
+        self.final_conv = nn.Conv2d(base_channels, n_classes, kernel_size=1)
+        
+    def conv_block(self, in_channels, out_channels):
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+    
+    def upconv_block(self, in_channels, out_channels):
+        return nn.Sequential(
+            nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+    
+    def forward(self, x):
+        # Encoder
+        e1 = self.encoder1(x)  # (B, 64, H, W)
+        e2 = self.encoder2(nn.MaxPool2d(2)(e1))  # (B, 128, H/2, W/2)
+        e3 = self.encoder3(nn.MaxPool2d(2)(e2))  # (B, 256, H/4, W/4)
+        e4 = self.encoder4(nn.MaxPool2d(2)(e3))  # (B, 512, H/8, W/8)
+        
+        # Bottleneck
+        b = self.bottleneck(nn.MaxPool2d(2)(e4))  # (B, 1024, H/16, W/16)
+        
+        # Decoder with skip connections
+        d4 = self.decoder4(b)  # (B, 512, H/8, W/8)
+        d4 = torch.cat([d4, e4], dim=1)  # (B, 1024, H/8, W/8)
+        
+        d3 = self.decoder3(d4)  # (B, 256, H/4, W/4)
+        d3 = torch.cat([d3, e3], dim=1)  # (B, 512, H/4, W/4)
+        
+        d2 = self.decoder2(d3)  # (B, 128, H/2, W/2)
+        d2 = torch.cat([d2, e2], dim=1)  # (B, 256, H/2, W/2)
+        
+        d1 = self.decoder1(d2)  # (B, 64, H, W)
+        
+        # Final prediction
+        out = self.final_conv(d1)  # (B, 1, H, W)
+        
+        return out.squeeze(1)  # (B, H, W)
+
+def create_2d_unet(in_channels: int, n_classes: int = 1, base_channels: int = 64):
+    """Create 2D U-Net model."""
+    if not TORCH_AVAILABLE:
+        raise ImportError("PyTorch is required for 2D U-Net")
+    return Height2DUNet(in_channels, n_classes, base_channels)
 from data.normalization import (
     normalize_sentinel1, normalize_sentinel2, normalize_srtm_elevation,
     normalize_srtm_slope, normalize_srtm_aspect, normalize_alos2_dn,
@@ -108,7 +184,7 @@ def modified_huber_loss(pred: torch.Tensor, target: torch.Tensor,
 
 def load_patch_data(patch_path: str, normalize_bands: bool = True) -> Tuple[np.ndarray, np.ndarray, Dict[str, int]]:
     """
-    Load 3D patch data from GeoTIFF file with normalization.
+    Load patch data from GeoTIFF file with improved temporal and normalization support.
     
     Args:
         patch_path: Path to patch GeoTIFF file
@@ -147,28 +223,101 @@ def load_patch_data(patch_path: str, normalize_bands: bool = True) -> Tuple[np.n
         
         features = data[feature_indices].astype(np.float32)
         
-        # Apply normalization if requested
+        # Crop to 256x256 if needed (handle 257x257 patches)
+        if features.shape[1] > 256 or features.shape[2] > 256:
+            print(f"Cropping patch from {features.shape[1]}x{features.shape[2]} to 256x256")
+            features = features[:, :256, :256]
+            gedi_target = gedi_target[:256, :256]
+        
+        # Apply improved normalization with temporal support
         if normalize_bands:
-            for i, idx in enumerate(feature_indices):
-                desc = band_descriptions[idx]
-                if desc.startswith('S1_'):
-                    features[i] = normalize_sentinel1(features[i])
-                elif desc.startswith('B') and len(desc) <= 3:  # S2 bands
-                    features[i] = normalize_sentinel2(features[i])
-                elif 'elevation' in desc.lower():
-                    features[i] = normalize_srtm_elevation(features[i])
-                elif 'slope' in desc.lower():
-                    features[i] = normalize_srtm_slope(features[i])
-                elif 'aspect' in desc.lower():
-                    features[i] = normalize_srtm_aspect(features[i])
-                elif desc.startswith('ALOS2_'):
-                    features[i] = normalize_alos2_dn(features[i])
-                elif desc == 'NDVI':
-                    features[i] = normalize_ndvi(features[i])
-                elif desc.startswith('ch_'):
-                    features[i] = normalize_canopy_height(features[i])
+            features = apply_band_normalization(features, band_descriptions, feature_indices)
     
     return features, gedi_target, band_info
+
+def apply_band_normalization(features: np.ndarray, band_descriptions: list, feature_indices: list) -> np.ndarray:
+    """Apply band-specific normalization with temporal support."""
+    
+    for i, idx in enumerate(feature_indices):
+        desc = band_descriptions[idx]
+        if not desc:
+            continue
+            
+        # Handle temporal bands (with _M## suffix)
+        base_desc = desc.split('_M')[0] if '_M' in desc else desc
+        
+        # Apply normalization based on base description
+        if base_desc.startswith('S1_'):
+            # Sentinel-1 normalization: (val + 25) / 25
+            features[i] = (features[i] + 25) / 25
+        elif base_desc in ['B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B11', 'B12']:
+            # Sentinel-2 reflectance: val / 10000, clip to [0,1]
+            features[i] = np.clip(features[i] / 10000.0, 0, 1)
+        elif base_desc == 'NDVI':
+            # NDVI: clip to [-1, 1]
+            features[i] = np.clip(features[i], -1, 1)
+        elif 'elevation' in desc.lower():
+            features[i] = normalize_srtm_elevation(features[i])
+        elif 'slope' in desc.lower():
+            features[i] = normalize_srtm_slope(features[i])
+        elif 'aspect' in desc.lower():
+            features[i] = normalize_srtm_aspect(features[i])
+        elif base_desc.startswith('ALOS2_'):
+            # ALOS2: keep as-is or apply light normalization if needed
+            features[i] = features[i]  # No normalization for now
+        elif base_desc.startswith('ch_'):
+            features[i] = normalize_canopy_height(features[i])
+        
+        # Replace any remaining NaN/inf values
+        features[i] = np.nan_to_num(features[i], nan=0.0, posinf=0.0, neginf=0.0)
+    
+    return features
+
+def extract_sparse_gedi_pixels(features: np.ndarray, gedi_target: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Extract feature vectors only for pixels with valid GEDI data.
+    
+    Args:
+        features: Feature array [bands, height, width]
+        gedi_target: GEDI target array [height, width]
+        
+    Returns:
+        X: Feature matrix [n_valid_pixels, n_bands]
+        y: Target vector [n_valid_pixels]
+    """
+    # Find valid GEDI pixels (not NaN and > 0)
+    valid_mask = ~np.isnan(gedi_target) & (gedi_target > 0)
+    valid_indices = np.where(valid_mask)
+    
+    if len(valid_indices[0]) == 0:
+        raise ValueError("No valid GEDI pixels found in patch")
+    
+    # Extract features for valid pixels only
+    X = features[:, valid_indices[0], valid_indices[1]].T  # Shape: (n_pixels, n_bands)
+    y = gedi_target[valid_indices]  # Shape: (n_pixels,)
+    
+    print(f"Extracted {len(y)} valid GEDI pixels from {gedi_target.size} total pixels ({len(y)/gedi_target.size*100:.2f}%)")
+    
+    return X, y
+
+def detect_temporal_mode(band_descriptions: list) -> bool:
+    """
+    Detect if patch data is temporal based on band naming convention.
+    
+    Args:
+        band_descriptions: List of band descriptions
+        
+    Returns:
+        True if temporal data detected, False otherwise
+    """
+    temporal_indicators = ['_M01', '_M02', '_M03', '_M04', '_M05', '_M06',
+                          '_M07', '_M08', '_M09', '_M10', '_M11', '_M12']
+    
+    for desc in band_descriptions:
+        if desc and any(indicator in desc for indicator in temporal_indicators):
+            return True
+    
+    return False
 
 def load_patches_from_directory(patches_dir: str, pattern: str = "*.tif") -> List[Tuple[np.ndarray, np.ndarray, str]]:
     """
@@ -383,14 +532,12 @@ def save_metrics_and_importance(metrics: dict, importance_data: dict, output_dir
         json.dump(output_data, f, indent=4)
     print(f"Saved model evaluation data to: {output_path}")
 
-def train_3d_unet(patch_data: List[Tuple[np.ndarray, np.ndarray, str]], 
-                 model_params: Dict = None, 
-                 training_params: Dict = None) -> Tuple[object, dict]:
+def train_2d_unet(patch_path: str, model_params: Dict = None, training_params: Dict = None) -> Tuple[object, dict]:
     """
-    Train 3D U-Net model on patch data.
+    Train 2D U-Net model on single patch with data augmentation.
     
     Args:
-        patch_data: List of (features, gedi_target, patch_name) tuples
+        patch_path: Path to patch TIF file
         model_params: Model hyperparameters
         training_params: Training hyperparameters
         
@@ -398,33 +545,41 @@ def train_3d_unet(patch_data: List[Tuple[np.ndarray, np.ndarray, str]],
         Trained model and metrics
     """
     if not TORCH_AVAILABLE:
-        raise ImportError("PyTorch is required for 3D U-Net training")
+        raise ImportError("PyTorch is required for 2D U-Net training")
     
     # Default parameters
     if model_params is None:
-        model_params = {'base_channels': 64}
+        model_params = {'base_channels': 32}  # Smaller for 2D
     if training_params is None:
         training_params = {
-            'epochs': 100,
-            'batch_size': 4,
+            'epochs': 50,
             'learning_rate': 1e-3,
             'weight_decay': 1e-4,
             'huber_delta': 1.0,
             'shift_radius': 1
         }
     
-    # Split data into train/val
-    train_size = int(0.8 * len(patch_data))
-    train_patches = patch_data[:train_size]
-    val_patches = patch_data[train_size:]
+    print(f"Loading patch data for 2D U-Net training...")
+    features, gedi_target, band_info = load_patch_data(patch_path)
     
-    print(f"Training on {len(train_patches)} patches, validating on {len(val_patches)} patches")
+    # Resize to 256x256 if needed
+    if features.shape[1] != 256 or features.shape[2] != 256:
+        from scipy.ndimage import zoom
+        scale_h = 256 / features.shape[1]
+        scale_w = 256 / features.shape[2]
+        
+        resized_features = np.zeros((features.shape[0], 256, 256), dtype=features.dtype)
+        for i in range(features.shape[0]):
+            resized_features[i] = zoom(features[i], (scale_h, scale_w), order=1)
+        
+        resized_gedi = zoom(gedi_target, (scale_h, scale_w), order=0)
+        features, gedi_target = resized_features, resized_gedi
     
-    # Get input dimensions from first patch
-    n_bands = patch_data[0][0].shape[0]
+    n_bands = features.shape[0]
+    print(f"Training 2D U-Net on {n_bands} bands, patch size: {features.shape[1]}x{features.shape[2]}")
     
     # Initialize model
-    model = create_3d_unet(
+    model = create_2d_unet(
         in_channels=n_bands,
         n_classes=1,
         base_channels=model_params['base_channels']
@@ -439,94 +594,177 @@ def train_3d_unet(patch_data: List[Tuple[np.ndarray, np.ndarray, str]],
         weight_decay=training_params['weight_decay']
     )
     
-    best_val_loss = float('inf')
+    # Convert to tensors
+    features_tensor = torch.FloatTensor(features).unsqueeze(0).to(device)  # [1, bands, H, W]
+    target_tensor = torch.FloatTensor(gedi_target).unsqueeze(0).to(device)  # [1, H, W]
+    
+    # Create mask for valid GEDI pixels
+    valid_mask = ~torch.isnan(target_tensor) & (target_tensor > 0)
+    
+    best_loss = float('inf')
     metrics = {}
     
     # Training loop
-    for epoch in tqdm(range(training_params['epochs']), desc="Training epochs"):
+    for epoch in tqdm(range(training_params['epochs']), desc="Training 2D U-Net"):
         model.train()
-        train_loss = 0.0
+        optimizer.zero_grad()
         
-        # Training
-        for features, gedi_target, _ in train_patches:
-            # Convert to tensors and add batch dimension
-            features_tensor = torch.FloatTensor(features).unsqueeze(0).to(device)
-            target_tensor = torch.FloatTensor(gedi_target).unsqueeze(0).to(device)
+        # Forward pass
+        pred = model(features_tensor)  # [1, H, W]
+        
+        # Compute loss only on valid GEDI pixels
+        if valid_mask.sum() > 0:
+            valid_pred = pred[valid_mask]
+            valid_target = target_tensor[valid_mask]
+            loss = nn.MSELoss()(valid_pred, valid_target)
+        else:
+            loss = torch.tensor(0.0, requires_grad=True, device=device)
+        
+        # Backward pass
+        if loss.item() > 0:
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+        
+        current_loss = loss.item()
+        if current_loss < best_loss:
+            best_loss = current_loss
+            metrics = {
+                'train_loss': current_loss,
+                'epoch': epoch,
+                'valid_gedi_pixels': valid_mask.sum().item()
+            }
+        
+        if (epoch + 1) % 10 == 0:
+            print(f"Epoch {epoch+1}/{training_params['epochs']}: Loss = {current_loss:.4f}")
+    
+    print(f"2D U-Net training complete. Best loss: {best_loss:.4f}")
+    return model, metrics
+
+def train_3d_unet(patch_path: str, model_params: Dict = None, training_params: Dict = None) -> Tuple[object, dict]:
+    """
+    Train 3D U-Net model on temporal patch with data augmentation.
+    
+    Args:
+        patch_path: Path to temporal patch TIF file
+        model_params: Model hyperparameters
+        training_params: Training hyperparameters
+        
+    Returns:
+        Trained model and metrics
+    """
+    if not TORCH_AVAILABLE:
+        raise ImportError("PyTorch is required for 3D U-Net training")
+    
+    # Default parameters
+    if model_params is None:
+        model_params = {'base_channels': 32}  # Smaller for memory
+    if training_params is None:
+        training_params = {
+            'epochs': 30,
+            'learning_rate': 1e-4,
+            'weight_decay': 1e-4,
+            'huber_delta': 1.0,
+            'shift_radius': 1
+        }
+    
+    print(f"Loading temporal patch data for 3D U-Net training...")
+    features, gedi_target, band_info = load_patch_data(patch_path)
+    
+    # Import the improved temporal dataset from our previous work
+    from train_temporal_fixed import ImprovedTemporalDataset, MaskedTemporalUNet
+    
+    # Use the improved temporal dataset
+    dataset = ImprovedTemporalDataset(patch_path, patch_size=256, augment=True)
+    
+    # Initialize model
+    model = MaskedTemporalUNet(in_channels=15, n_classes=1).to(device)
+    optimizer = torch.optim.Adam(
+        model.parameters(), 
+        lr=training_params['learning_rate'],
+        weight_decay=training_params['weight_decay']
+    )
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    best_loss = float('inf')
+    metrics = {}
+    
+    # Training loop
+    for epoch in tqdm(range(training_params['epochs']), desc="Training 3D U-Net"):
+        model.train()
+        epoch_loss = 0.0
+        num_batches = 0
+        
+        # Train on augmented patches
+        for i in range(len(dataset)):
+            features, target, gedi_mask, availability = dataset[i]
             
-            # Add temporal dimension for 3D conv (treating as single time step)
-            features_tensor = features_tensor.unsqueeze(2)  # [1, bands, 1, H, W]
+            features = features.unsqueeze(0).to(device)  # Add batch dim
+            target = target.unsqueeze(0).to(device)
+            gedi_mask = gedi_mask.unsqueeze(0).to(device)
+            availability = availability.unsqueeze(0).to(device)
             
             optimizer.zero_grad()
             
             # Forward pass
-            pred = model(features_tensor)
+            pred = model(features, availability)
             
-            # Compute loss with spatial shift awareness
-            loss = modified_huber_loss(
-                pred, target_tensor.unsqueeze(1),  # Add channel dim
-                delta=training_params['huber_delta'],
-                shift_radius=training_params['shift_radius']
-            )
+            # Compute loss only on valid GEDI pixels
+            if gedi_mask.sum() > 0:
+                valid_pred = pred[gedi_mask > 0]
+                valid_target = target[gedi_mask > 0]
+                loss = nn.MSELoss()(valid_pred, valid_target)
+            else:
+                loss = torch.tensor(0.0, requires_grad=True, device=device)
             
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item()
+            # Backward pass
+            if loss.item() > 0:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+            
+            epoch_loss += loss.item()
+            num_batches += 1
         
-        # Validation
-        if val_patches:
-            model.eval()
-            val_loss = 0.0
-            with torch.no_grad():
-                for features, gedi_target, _ in val_patches:
-                    features_tensor = torch.FloatTensor(features).unsqueeze(0).unsqueeze(2).to(device)
-                    target_tensor = torch.FloatTensor(gedi_target).unsqueeze(0).to(device)
-                    
-                    pred = model(features_tensor)
-                    loss = modified_huber_loss(
-                        pred, target_tensor.unsqueeze(1),
-                        delta=training_params['huber_delta'],
-                        shift_radius=training_params['shift_radius']
-                    )
-                    val_loss += loss.item()
-            
-            val_loss /= len(val_patches)
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                metrics = {
-                    'train_loss': train_loss / len(train_patches),
-                    'val_loss': val_loss,
-                    'epoch': epoch
-                }
+        avg_loss = epoch_loss / num_batches if num_batches > 0 else 0
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            metrics = {
+                'train_loss': avg_loss,
+                'epoch': epoch
+            }
+        
+        if (epoch + 1) % 5 == 0:
+            print(f"Epoch {epoch+1}/{training_params['epochs']}: Loss = {avg_loss:.4f}")
     
+    print(f"3D U-Net training complete. Best loss: {best_loss:.4f}")
     return model, metrics
 
-def train_model(X: np.ndarray, y: np.ndarray, model_type: str = 'rf', batch_size: int = 64,
-                test_size: float = 0.2, feature_names: Optional[list] = None,
-                n_bands: Optional[int] = None, **kwargs) -> Tuple[object, dict, dict]:
+def train_model(X: np.ndarray, y: np.ndarray, model_type: str = 'rf', 
+                batch_size: int = 64, test_size: float = 0.2, feature_names: Optional[list] = None,
+                n_bands: Optional[int] = None) -> Tuple[object, dict, dict]:
     """
-    Train model with optional validation split.
+    Training function for traditional models (RF/MLP only).
+    U-Net models are handled separately in main().
     
     Args:
-        X: Feature matrix
-        y: Target variable
-        model_type: Type of model ('rf', 'mlp', or '3d_unet')
-        batch_size: Batch size for neural network training
+        X: Feature matrix (extracted from patch for GEDI pixels)
+        y: Target variable (extracted from patch for GEDI pixels)
+        model_type: Type of model ('rf' or 'mlp')
+        batch_size: Batch size for MLP training
         test_size: Proportion of data to use for validation
         feature_names: Optional list of feature names
         
     Returns:
         Trained model, training metrics, and feature importance/weights
     """
-    # Handle 3D U-Net case
-    if model_type == '3d_unet':
-        if 'patch_data' not in kwargs:
-            raise ValueError("patch_data required for 3D U-Net training")
-        model, train_metrics = train_3d_unet(
-            kwargs['patch_data'],
-            kwargs.get('model_params'),
-            kwargs.get('training_params')
-        )
-        return model, train_metrics, {}
+    if model_type not in ['rf', 'mlp']:
+        raise ValueError(f"train_model only supports 'rf' and 'mlp', got '{model_type}'")
+    
+    if X.shape[0] < 10:  # Need minimum samples for train/val split
+        raise ValueError(f"Insufficient GEDI pixels ({X.shape[0]}) for {model_type.upper()} training. Need at least 10.")
+    
+    print(f"Training {model_type.upper()} on {X.shape[0]} GEDI pixels with {X.shape[1]} features")
     
     # Split data for traditional models
     X_train, X_val, y_train, y_val = train_test_split(
@@ -676,233 +914,577 @@ def save_predictions(predictions: np.ndarray, src: rasterio.DatasetReader, outpu
     finally:
         src.close()
 
+def train_2d_unet(features: np.ndarray, gedi_target: np.ndarray, 
+                  epochs: int = 50, learning_rate: float = 1e-3, weight_decay: float = 1e-4,
+                  base_channels: int = 32, huber_delta: float = 1.0, shift_radius: int = 1) -> Tuple[nn.Module, Dict]:
+    """
+    Train 2D U-Net model on patch data.
+    
+    Args:
+        features: Feature array [bands, height, width]
+        gedi_target: GEDI target array [height, width]
+        epochs: Number of training epochs
+        learning_rate: Learning rate
+        weight_decay: Weight decay
+        base_channels: Base channels for U-Net
+        huber_delta: Huber loss delta
+        shift_radius: Spatial shift radius for GEDI alignment
+        
+    Returns:
+        model: Trained 2D U-Net model
+        metrics: Training metrics dictionary
+    """
+    if not TORCH_AVAILABLE:
+        raise ImportError("PyTorch is required for 2D U-Net training")
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Training 2D U-Net on device: {device}")
+    
+    # Create model
+    model = create_2d_unet(in_channels=features.shape[0], n_classes=1, base_channels=base_channels)
+    model = model.to(device)
+    
+    # Setup optimizer and criterion
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    
+    # Convert data to tensors
+    features_tensor = torch.FloatTensor(features).unsqueeze(0).to(device)  # Add batch dim
+    gedi_tensor = torch.FloatTensor(gedi_target).unsqueeze(0).to(device)   # Add batch dim
+    
+    # Create valid mask for GEDI pixels
+    valid_mask = ~torch.isnan(gedi_tensor) & (gedi_tensor > 0)
+    
+    print(f"Valid GEDI pixels: {valid_mask.sum().item()}/{gedi_tensor.numel()}")
+    
+    # Training loop
+    model.train()
+    train_losses = []
+    
+    for epoch in tqdm(range(epochs), desc="Training 2D U-Net"):
+        optimizer.zero_grad()
+        
+        # Forward pass
+        predictions = model(features_tensor)  # [1, H, W]
+        
+        # Calculate modified Huber loss with shift awareness
+        loss = modified_huber_loss(predictions, gedi_tensor, valid_mask, huber_delta, shift_radius)
+        
+        # Backward pass
+        loss.backward()
+        optimizer.step()
+        
+        train_losses.append(loss.item())
+        
+        if epoch % 10 == 0:
+            print(f"Epoch {epoch}/{epochs}, Loss: {loss.item():.4f}")
+    
+    # Calculate final metrics on valid GEDI pixels
+    model.eval()
+    with torch.no_grad():
+        final_predictions = model(features_tensor)
+        
+        # Extract predictions and targets for valid GEDI pixels only
+        valid_preds = final_predictions[valid_mask].cpu().numpy()
+        valid_targets = gedi_tensor[valid_mask].cpu().numpy()
+        
+        # Calculate metrics using existing function
+        metrics = calculate_metrics(valid_preds, valid_targets)
+        metrics['train_loss'] = np.mean(train_losses[-10:])  # Average of last 10 epochs
+        metrics['final_loss'] = train_losses[-1]
+    
+    return model, metrics
+
+def separate_temporal_nontemporal_bands(features: np.ndarray, band_descriptions: list) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Separate temporal and non-temporal bands from feature array.
+    
+    Args:
+        features: Feature array [bands, height, width]
+        band_descriptions: List of band descriptions
+        
+    Returns:
+        temporal_features: Temporal bands [temporal_bands, height, width]
+        nontemporal_features: Non-temporal bands [nontemporal_bands, height, width]
+    """
+    temporal_indices = []
+    nontemporal_indices = []
+    
+    for i, desc in enumerate(band_descriptions):
+        if desc and desc not in ['rh', 'forest_mask']:
+            # Check if band has monthly suffix (_M01 to _M12)
+            if any(f'_M{m:02d}' in desc for m in range(1, 13)):
+                temporal_indices.append(i)
+            else:
+                nontemporal_indices.append(i)
+    
+    temporal_features = features[temporal_indices] if temporal_indices else np.empty((0, features.shape[1], features.shape[2]))
+    nontemporal_features = features[nontemporal_indices] if nontemporal_indices else np.empty((0, features.shape[1], features.shape[2]))
+    
+    print(f"Separated bands: {len(temporal_indices)} temporal, {len(nontemporal_indices)} non-temporal")
+    
+    return temporal_features, nontemporal_features
+
+def train_3d_unet(features: np.ndarray, gedi_target: np.ndarray,
+                  epochs: int = 50, learning_rate: float = 1e-3, weight_decay: float = 1e-4,
+                  base_channels: int = 32, huber_delta: float = 1.0, shift_radius: int = 1) -> Tuple[nn.Module, Dict]:
+    """
+    Train 3D U-Net model on temporal patch data.
+    
+    Args:
+        features: Feature array [bands, height, width] (all bands including non-temporal)
+        gedi_target: GEDI target array [height, width]
+        epochs: Number of training epochs
+        learning_rate: Learning rate
+        weight_decay: Weight decay
+        base_channels: Base channels for U-Net
+        huber_delta: Huber loss delta
+        shift_radius: Spatial shift radius for GEDI alignment
+        
+    Returns:
+        model: Trained 3D U-Net model
+        metrics: Training metrics dictionary
+    """
+    if not TORCH_AVAILABLE:
+        raise ImportError("PyTorch is required for 3D U-Net training")
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Training 3D U-Net on device: {device}")
+    
+    # Load band descriptions to separate temporal/non-temporal bands
+    # For now, assume the temporal structure: 180 temporal bands (15 bands × 12 months)
+    n_bands = features.shape[0]
+    h, w = features.shape[1], features.shape[2]
+    
+    # Expected structure: 180 temporal + 14 non-temporal = 194 total feature bands
+    n_temporal_expected = 180  # 15 bands × 12 months
+    n_nontemporal_expected = n_bands - n_temporal_expected
+    
+    if n_bands >= n_temporal_expected:
+        # Separate temporal and non-temporal bands
+        temporal_features = features[:n_temporal_expected]  # First 180 bands
+        nontemporal_features = features[n_temporal_expected:] if n_bands > n_temporal_expected else np.empty((0, h, w))
+        
+        print(f"Using expected temporal structure: {n_temporal_expected} temporal + {len(nontemporal_features)} non-temporal bands")
+        
+        # Reshape temporal data: (180, h, w) -> (15, 12, h, w)
+        n_channels_per_month = 15  # S1(2) + S2(11) + ALOS2(2) = 15
+        n_months = 12
+        
+        temporal_features_reshaped = temporal_features.reshape(n_channels_per_month, n_months, h, w)
+        
+        # Handle missing values in temporal data
+        temporal_features_reshaped = np.nan_to_num(temporal_features_reshaped, nan=0.0, posinf=0.0, neginf=0.0)
+        
+        print(f"Reshaped temporal data: {n_temporal_expected} bands -> {n_channels_per_month} channels × {n_months} months")
+        
+        # For 3D U-Net, we'll use temporal features. Non-temporal can be added as extra channels if needed
+        if len(nontemporal_features) > 0:
+            # Repeat non-temporal features across time dimension
+            nontemporal_expanded = np.tile(nontemporal_features[:, np.newaxis, :, :], (1, n_months, 1, 1))
+            # Combine temporal and non-temporal
+            combined_features = np.concatenate([temporal_features_reshaped, nontemporal_expanded], axis=0)
+            n_total_channels = n_channels_per_month + len(nontemporal_features)
+        else:
+            combined_features = temporal_features_reshaped
+            n_total_channels = n_channels_per_month
+    else:
+        raise ValueError(f"Insufficient bands for temporal processing: got {n_bands}, expected at least {n_temporal_expected}")
+    
+    print(f"Final 3D input shape: {n_total_channels} channels × {n_months} months × {h}×{w}")
+    
+    # Create model - use smaller base_channels to avoid memory issues and temporal dimension problems
+    # For temporal data with only 12 months, we need to be careful with downsampling
+    model_base_channels = min(base_channels, 16)  # Use smaller channels for 3D
+    print(f"Creating 3D U-Net with {model_base_channels} base channels (reduced for temporal processing)")
+    
+    try:
+        model = create_3d_unet(in_channels=n_total_channels, n_classes=1, base_channels=model_base_channels)
+        model = model.to(device)
+        
+        # Test the model with a small input to verify it works
+        test_input = torch.randn(1, n_total_channels, n_months, 32, 32).to(device)
+        with torch.no_grad():
+            test_output = model(test_input)
+            print(f"Model test successful: {test_input.shape} -> {test_output.shape}")
+    except Exception as e:
+        print(f"Model creation failed with error: {e}")
+        print("Falling back to simplified temporal processing...")
+        
+        # Fallback: reduce temporal dimension by averaging or use 2D approach
+        # Average across temporal dimension to create 2D input
+        averaged_features = np.mean(combined_features, axis=1)  # Average across time
+        print(f"Fallback: Using temporal average, shape: {averaged_features.shape}")
+        
+        # Use 2D U-Net instead
+        model = create_2d_unet(in_channels=averaged_features.shape[0], n_classes=1, base_channels=base_channels)
+        model = model.to(device)
+        
+        # Update the combined_features for training
+        combined_features = averaged_features
+        print("Using 2D U-Net with temporally averaged features as fallback")
+    
+    # Setup optimizer and criterion
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    
+    # Convert data to tensors - handle both 3D and 2D cases
+    if len(combined_features.shape) == 4:  # 3D case: (channels, time, h, w)
+        features_tensor = torch.FloatTensor(combined_features).unsqueeze(0).to(device)  # Add batch dim
+    else:  # 2D fallback case: (channels, h, w)
+        features_tensor = torch.FloatTensor(combined_features).unsqueeze(0).to(device)  # Add batch dim
+    
+    gedi_tensor = torch.FloatTensor(gedi_target).unsqueeze(0).to(device)           # Add batch dim
+    
+    # Create valid mask for GEDI pixels
+    valid_mask = ~torch.isnan(gedi_tensor) & (gedi_tensor > 0)
+    
+    print(f"Valid GEDI pixels: {valid_mask.sum().item()}/{gedi_tensor.numel()}")
+    
+    # Training loop
+    model.train()
+    train_losses = []
+    
+    for epoch in tqdm(range(epochs), desc="Training 3D U-Net"):
+        optimizer.zero_grad()
+        
+        # Forward pass
+        predictions = model(features_tensor)  # [1, H, W]
+        
+        # Calculate modified Huber loss with shift awareness
+        loss = modified_huber_loss(predictions, gedi_tensor, valid_mask, huber_delta, shift_radius)
+        
+        # Backward pass
+        loss.backward()
+        optimizer.step()
+        
+        train_losses.append(loss.item())
+        
+        if epoch % 10 == 0:
+            print(f"Epoch {epoch}/{epochs}, Loss: {loss.item():.4f}")
+    
+    # Calculate final metrics on valid GEDI pixels
+    model.eval()
+    with torch.no_grad():
+        final_predictions = model(features_tensor)
+        
+        # Extract predictions and targets for valid GEDI pixels only
+        valid_preds = final_predictions[valid_mask].cpu().numpy()
+        valid_targets = gedi_tensor[valid_mask].cpu().numpy()
+        
+        # Calculate metrics using existing function
+        metrics = calculate_metrics(valid_preds, valid_targets)
+        metrics['train_loss'] = np.mean(train_losses[-10:])  # Average of last 10 epochs
+        metrics['final_loss'] = train_losses[-1]
+    
+    return model, metrics
+
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train model and generate canopy height predictions')
+    parser = argparse.ArgumentParser(description='Unified patch-based training for all model types')
     
-    # Input paths
-    parser.add_argument('--training-data', type=str, required=False,
-                       help='Path to training data CSV (not used for 3D U-Net)')
-    parser.add_argument('--stack', type=str, required=False,
-                       help='Path to stack TIF file (not used for 3D U-Net)')
-    parser.add_argument('--mask', type=str, required=False,
-                       help='Path to forest mask TIF')
-    parser.add_argument('--buffered-mask', type=str, required=False,
-                       help='Path to buffered forest mask TIF')
-    
-    # 3D U-Net specific paths
-    parser.add_argument('--patches-dir', type=str, default='chm_outputs',
-                       help='Directory containing patch TIF files')
-    parser.add_argument('--patch-pattern', type=str, default='*_patch*.tif',
-                       help='Pattern to match patch files')
+    # Primary input (required for all models)
+    parser.add_argument('--patch-path', type=str, required=True,
+                       help='Path to patch TIF file with GEDI rh band')
     
     # Output settings
     parser.add_argument('--output-dir', type=str, default='chm_outputs',
-                       help='Output directory for predictions')
+                       help='Output directory for models and predictions')
     
-    # Model parameters
-    parser.add_argument('--model', type=str, default='rf', choices=['rf', 'mlp', '3d_unet'],
-                       help='Model type: random forest (rf), MLP neural network (mlp), or 3D U-Net (3d_unet)')
-    parser.add_argument('--batch-size', type=int, default=64,
-                       help='Batch size for neural network training')
-    parser.add_argument('--n-bands', type=int, default=None,
-                       help='Number of spectral bands for band-wise normalization')
+    # Model selection
+    parser.add_argument('--model', type=str, default='rf', choices=['rf', 'mlp', '2d_unet', '3d_unet'],
+                       help='Model type: random forest (rf), MLP (mlp), 2D U-Net (2d_unet), or 3D U-Net (3d_unet)')
+    
+    # Traditional model parameters (RF/MLP)
     parser.add_argument('--test-size', type=float, default=0.2,
-                       help='Proportion of data to use for validation')
-    parser.add_argument('--apply-forest-mask', action='store_true',
-                       help='Apply forest mask to predictions')
-    parser.add_argument('--ch_col', type=str, default='rh',
-                       help='Column name for canopy height')
+                       help='Proportion of GEDI pixels to use for validation (RF/MLP only)')
+    parser.add_argument('--batch-size', type=int, default=32,
+                       help='Batch size for training')
     
-    # 3D U-Net specific parameters
-    parser.add_argument('--epochs', type=int, default=100,
-                       help='Number of training epochs for 3D U-Net')
+    # Neural network parameters (all U-Nets)
+    parser.add_argument('--epochs', type=int, default=50,
+                       help='Number of training epochs (U-Net models)')
     parser.add_argument('--learning-rate', type=float, default=1e-3,
-                       help='Learning rate for 3D U-Net')
+                       help='Learning rate (U-Net models)')
     parser.add_argument('--weight-decay', type=float, default=1e-4,
-                       help='Weight decay for 3D U-Net')
+                       help='Weight decay (U-Net models)')
+    parser.add_argument('--base-channels', type=int, default=32,
+                       help='Base number of channels in U-Net models')
+    
+    # Advanced training parameters
     parser.add_argument('--huber-delta', type=float, default=1.0,
-                       help='Huber loss delta parameter')
+                       help='Huber loss delta parameter (U-Net models)')
     parser.add_argument('--shift-radius', type=int, default=1,
-                       help='Spatial shift radius for GEDI alignment')
-    parser.add_argument('--base-channels', type=int, default=64,
-                       help='Base number of channels in 3D U-Net')
+                       help='Spatial shift radius for GEDI alignment (U-Net models)')
+    
+    # Generation and evaluation
+    parser.add_argument('--generate-prediction', action='store_true',
+                       help='Generate prediction map after training')
+    parser.add_argument('--prediction-output', type=str, default=None,
+                       help='Output path for prediction TIF (auto-generated if not specified)')
     
     return parser.parse_args()
 
 def main():
-    # Parse arguments
+    """Unified main function for all model types using patch-based input."""
     args = parse_args()
     
-    ch_col = args.ch_col
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
-    if args.model == '3d_unet':
-        # 3D U-Net workflow
-        print("Loading patch data for 3D U-Net...")
+    print(f"Training {args.model.upper()} model using patch: {args.patch_path}")
+    
+    # Load patch data
+    print("Loading patch data...")
+    features, gedi_target, band_info = load_patch_data(args.patch_path, normalize_bands=True)
+    
+    # Detect temporal mode
+    band_descriptions = list(band_info.keys())
+    is_temporal = detect_temporal_mode(band_descriptions)
+    
+    print(f"Patch data: {features.shape[0]} bands, {features.shape[1]}x{features.shape[2]} pixels")
+    print(f"Temporal mode detected: {is_temporal}")
+    print(f"Valid GEDI pixels: {np.sum(~np.isnan(gedi_target) & (gedi_target > 0))}/{gedi_target.size}")
+    
+    # Validate model-data compatibility
+    if args.model == '2d_unet' and is_temporal:
+        raise ValueError("2D U-Net cannot be used with temporal data. Use '3d_unet' or enable non-temporal mode in chm_main.py")
+    if args.model == '3d_unet' and not is_temporal:
+        raise ValueError("3D U-Net requires temporal data. Use '2d_unet' or enable temporal mode in chm_main.py")
+    
+    # Train model based on type
+    if args.model in ['rf', 'mlp']:
+        # Extract sparse GEDI pixels for traditional models
+        print("Extracting sparse GEDI pixels for RF/MLP training...")
+        X, y = extract_sparse_gedi_pixels(features, gedi_target)
         
-        # Load patch data
-        patch_data = load_patches_from_directory(args.patches_dir, args.patch_pattern)
+        # Create feature names from band descriptions
+        feature_names = [desc for desc in band_descriptions if desc and desc not in ['rh', 'forest_mask']]
         
-        if not patch_data:
-            raise ValueError(f"No patch files found in {args.patches_dir} with pattern {args.patch_pattern}")
-        
-        print(f"Loaded {len(patch_data)} patches")
-        
-        # Set up training parameters
-        model_params = {'base_channels': args.base_channels}
-        training_params = {
-            'epochs': args.epochs,
-            'batch_size': args.batch_size,
-            'learning_rate': args.learning_rate,
-            'weight_decay': args.weight_decay,
-            'huber_delta': args.huber_delta,
-            'shift_radius': args.shift_radius
-        }
-        
-        # Train 3D U-Net
-        print("Training 3D U-Net model...")
+        # Train traditional model
         model, train_metrics, importance_data = train_model(
-            None, None,  # X, y not used for 3D U-Net
+            X, y,
             model_type=args.model,
-            patch_data=patch_data,
-            model_params=model_params,
-            training_params=training_params
+            batch_size=args.batch_size,
+            test_size=args.test_size,
+            feature_names=feature_names
+        )
+        
+        # Save model
+        if args.model == 'rf':
+            import joblib
+            model_path = os.path.join(args.output_dir, 'rf_model.pkl')
+            joblib.dump(model, model_path)
+        else:  # MLP
+            model_path = os.path.join(args.output_dir, 'mlp_model.pth')
+            if TORCH_AVAILABLE:
+                torch.save(model.state_dict(), model_path)
+        
+        print(f"Saved {args.model.upper()} model to: {model_path}")
+        
+    elif args.model == '2d_unet':
+        # Train 2D U-Net
+        print("Training 2D U-Net...")
+        model, train_metrics = train_2d_unet(
+            features, gedi_target,
+            epochs=args.epochs,
+            learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
+            base_channels=args.base_channels,
+            huber_delta=args.huber_delta,
+            shift_radius=args.shift_radius
+        )
+        
+        # Save model
+        model_path = os.path.join(args.output_dir, '2d_unet_model.pth')
+        if TORCH_AVAILABLE:
+            torch.save(model.state_dict(), model_path)
+        print(f"Saved 2D U-Net model to: {model_path}")
+        
+        importance_data = {}  # U-Net doesn't have traditional feature importance
+        
+    elif args.model == '3d_unet':
+        # Train 3D U-Net
+        print("Training 3D U-Net...")
+        model, train_metrics = train_3d_unet(
+            features, gedi_target,
+            epochs=args.epochs,
+            learning_rate=args.learning_rate,
+            weight_decay=args.weight_decay,
+            base_channels=args.base_channels,
+            huber_delta=args.huber_delta,
+            shift_radius=args.shift_radius
         )
         
         # Save model
         model_path = os.path.join(args.output_dir, '3d_unet_model.pth')
         if TORCH_AVAILABLE:
             torch.save(model.state_dict(), model_path)
-            print(f"Saved 3D U-Net model to: {model_path}")
+        print(f"Saved 3D U-Net model to: {model_path}")
         
-        # Save metrics
-        save_metrics_and_importance(train_metrics, {}, args.output_dir)
-        
-        print("3D U-Net training completed!")
-        print(f"Final training loss: {train_metrics.get('train_loss', 'N/A'):.4f}")
-        print(f"Final validation loss: {train_metrics.get('val_loss', 'N/A'):.4f}")
-        
-    else:
-        # Traditional workflow (RF/MLP)
-        if not args.training_data or not args.stack:
-            raise ValueError("--training-data and --stack are required for traditional models")
-        
-        # Load training data
-        print("Loading training data...")
-        df = pd.read_csv(args.training_data)
-        
-        # Filter out samples with slope > 20
-        slope_cols = [col for col in df.columns if col.endswith('_slope')]
-        for col in slope_cols:
-            df = df[df[col] <= 20]
-        
-        # Define columns to remove
-        remove_cols = [ch_col, 'longitude', 'latitude', 'rh',
-                      'digital_elevation_model', 'digital_elevation_model_srtm', 'elev_lowestmode']
-        feature_names = [col for col in df.columns if col not in remove_cols]
-        
-        # Write filtered DataFrame back to file for consistency
-        filtered_training_path = os.path.join(args.output_dir, 'filtered_training.csv')
-        df.to_csv(filtered_training_path, index=False)
-        
-        # Load filtered training data
-        X, y = load_training_data(filtered_training_path, args.buffered_mask,
-                                 feature_names=feature_names, ch_col=ch_col)
-        print(f"Loaded training data with {X.shape[1]} features and {len(y)} samples")
-        
-        # Train model
-        print("Training model...")
-        model, train_metrics, importance_data = train_model(
-            X, y,
-            model_type=args.model,
-            batch_size=args.batch_size,
-            test_size=args.test_size,
-            feature_names=feature_names,
-            n_bands=args.n_bands
-        )
-        
-        # Save metrics and importance
-        save_metrics_and_importance(train_metrics, importance_data, args.output_dir)
-        
-        # Load prediction data and generate predictions
-        print("Loading prediction data...")
-        print(f"Using {len(feature_names)} features for prediction: {', '.join(feature_names)}")
-        X_pred, src = load_prediction_data(args.stack, args.mask, feature_names=feature_names)
-        print(f"Loaded prediction data with shape: {X_pred.shape}")
-        
-        if X_pred.shape[1] != X.shape[1]:
-            raise ValueError(f"Feature count mismatch: Training has {X.shape[1]} features, but prediction data has {X_pred.shape[1]} features")
-        
-        # Make predictions
-        print("Generating predictions...")
-        if args.model == 'rf':
-            predictions = model.predict(X_pred)
-        else:  # MLP model
-            model.eval()
-            with torch.no_grad():
-                # Normalize prediction data
-                X_pred_tensor = torch.FloatTensor(X_pred)
-                X_pred_normalized = (X_pred_tensor - model.scaler_mean) / model.scaler_std
-                
-                # Make predictions in batches
-                predictions = []
-                for i in range(0, len(X_pred), args.batch_size):
-                    batch = X_pred_normalized[i:i + args.batch_size]
-                    if torch.cuda.is_available():
-                        batch = batch.cuda()
-                    pred = model(batch)
-                    predictions.extend(pred.cpu().numpy())
-                predictions = np.array(predictions)
-        
-        print(f"Generated {len(predictions)} predictions")
-        output_path = Path(args.output_dir) / f"{Path(args.stack).stem.replace('stack_', 'predictCH')}_{ch_col}.tif"
-        
-        # Save predictions
-        print(f"Saving predictions to: {output_path}")
-        save_predictions(predictions, src, output_path, args.mask)
-        print("Done!")
+        importance_data = {}  # U-Net doesn't have traditional feature importance
     
     # Save metrics and importance
-    save_metrics_and_importance(train_metrics, importance_data, args.output_dir)
+    metrics_path = os.path.join(args.output_dir, 'training_metrics.json')
+    import json
     
-    # Load prediction data
-    print("Loading prediction data...")
-    print(f"Using {len(feature_names)} features for prediction: {', '.join(feature_names)}")
-    X_pred, src = load_prediction_data(args.stack, args.mask, feature_names=feature_names)
-    print(f"Loaded prediction data with shape: {X_pred.shape}")
+    # Convert numpy types to Python types for JSON serialization
+    def convert_numpy_types(obj):
+        if isinstance(obj, dict):
+            return {k: convert_numpy_types(v) for k, v in obj.items()}
+        elif isinstance(obj, (np.float32, np.float64)):
+            return float(obj)
+        elif isinstance(obj, (np.int32, np.int64)):
+            return int(obj)
+        else:
+            return obj
     
-    if X_pred.shape[1] != X.shape[1]:
-        raise ValueError(f"Feature count mismatch: Training has {X.shape[1]} features, but prediction data has {X_pred.shape[1]} features")
+    with open(metrics_path, 'w') as f:
+        json.dump({
+            'metrics': convert_numpy_types(train_metrics),
+            'importance': convert_numpy_types(importance_data),
+            'model_type': args.model,
+            'temporal_mode': is_temporal,
+            'patch_path': args.patch_path
+        }, f, indent=2)
     
-    # Make predictions
-    print("Generating predictions...")
-    if args.model == 'rf':
-        predictions = model.predict(X_pred)
-    else:  # MLP model
-        model.eval()
-        with torch.no_grad():
-            # Normalize prediction data
-            X_pred_tensor = torch.FloatTensor(X_pred)
-            X_pred_normalized = (X_pred_tensor - model.scaler_mean) / model.scaler_std
+    print(f"Saved training metrics to: {metrics_path}")
+    
+    # Print training results
+    print("\\nTraining Results:")
+    for metric, value in train_metrics.items():
+        if isinstance(value, (int, float)):
+            print(f"{metric}: {value:.4f}")
+        else:
+            print(f"{metric}: {value}")
+    
+    if importance_data:
+        print("\\nTop 5 Important Features:")
+        for name, imp in list(importance_data.items())[:5]:
+            print(f"{name}: {imp:.3f}")
+    
+    # Generate prediction if requested or automatically for RF/MLP
+    if args.generate_prediction or args.model in ['rf', 'mlp']:
+        print("\\nGenerating prediction map...")
+        
+        if args.model in ['rf', 'mlp']:
+            # For traditional models, predict on all pixels
+            print("Reshaping patch for pixel-wise prediction...")
+            # Reshape features for prediction: (n_pixels, n_bands)
+            h, w = features.shape[1], features.shape[2]
+            X_pred = features.reshape(features.shape[0], -1).T  # (n_pixels, n_bands)
             
-            # Make predictions in batches
-            predictions = []
-            for i in range(0, len(X_pred), args.batch_size):
-                batch = X_pred_normalized[i:i + args.batch_size]
+            # Handle NaN values for prediction (set to 0)
+            X_pred = np.nan_to_num(X_pred, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            print(f"Predicting on {X_pred.shape[0]} pixels with {X_pred.shape[1]} features...")
+            
+            if args.model == 'rf':
+                predictions = model.predict(X_pred)
+            else:  # MLP
+                model.eval()
+                with torch.no_grad():
+                    X_pred_tensor = torch.FloatTensor(X_pred)
+                    X_pred_normalized = (X_pred_tensor - model.scaler_mean) / model.scaler_std
+                    
+                    predictions = []
+                    batch_size = min(args.batch_size, 1024)  # Limit batch size for memory
+                    
+                    for i in tqdm(range(0, len(X_pred), batch_size), desc="Predicting batches"):
+                        batch = X_pred_normalized[i:i + batch_size]
+                        if torch.cuda.is_available():
+                            batch = batch.cuda()
+                        pred = model(batch)
+                        predictions.extend(pred.cpu().numpy())
+                    predictions = np.array(predictions)
+            
+            # Reshape back to spatial dimensions
+            predictions = predictions.reshape(h, w)
+            print(f"Generated prediction map with shape: {predictions.shape}")
+            print(f"Prediction range: [{predictions.min():.2f}, {predictions.max():.2f}]")
+            
+        else:  # U-Net models
+            model.eval()
+            with torch.no_grad():
+                # Add batch dimension
+                if args.model == '2d_unet':
+                    # features: (bands, h, w) -> (1, bands, h, w)
+                    input_tensor = torch.FloatTensor(features).unsqueeze(0)
+                else:  # 3d_unet
+                    # Reshape temporal data using same logic as train_3d_unet
+                    n_bands = features.shape[0]
+                    h, w = features.shape[1], features.shape[2]
+                    
+                    # Expected structure: 180 temporal + 14 non-temporal = 194 total feature bands
+                    n_temporal_expected = 180  # 15 bands × 12 months
+                    
+                    if n_bands >= n_temporal_expected:
+                        # Separate temporal and non-temporal bands
+                        temporal_features = features[:n_temporal_expected]  # First 180 bands
+                        nontemporal_features = features[n_temporal_expected:] if n_bands > n_temporal_expected else np.empty((0, h, w))
+                        
+                        # Reshape temporal data: (180, h, w) -> (15, 12, h, w)
+                        n_channels_per_month = 15  # S1(2) + S2(11) + ALOS2(2) = 15
+                        n_months = 12
+                        
+                        temporal_features_reshaped = temporal_features.reshape(n_channels_per_month, n_months, h, w)
+                        
+                        # Handle missing values in temporal data
+                        temporal_features_reshaped = np.nan_to_num(temporal_features_reshaped, nan=0.0, posinf=0.0, neginf=0.0)
+                        
+                        # Combine temporal and non-temporal features
+                        if len(nontemporal_features) > 0:
+                            # Repeat non-temporal features across time dimension
+                            nontemporal_expanded = np.tile(nontemporal_features[:, np.newaxis, :, :], (1, n_months, 1, 1))
+                            # Combine temporal and non-temporal
+                            combined_features = np.concatenate([temporal_features_reshaped, nontemporal_expanded], axis=0)
+                        else:
+                            combined_features = temporal_features_reshaped
+                        
+                        # Check if we need to apply the same fallback logic as in training
+                        try:
+                            # Test with small input to see if 3D works
+                            test_input = torch.randn(1, combined_features.shape[0], 12, 32, 32)
+                            # Try to load the model and see if it expects 3D or 2D input
+                            with torch.no_grad():
+                                if hasattr(model, 'encoder1'):  # 2D U-Net (fallback was used)
+                                    # Use temporal averaging for prediction too
+                                    averaged_features = np.mean(combined_features, axis=1)  # Average across time
+                                    input_tensor = torch.FloatTensor(averaged_features).unsqueeze(0)
+                                    print(f"Using temporal averaging for prediction: {averaged_features.shape}")
+                                else:  # 3D U-Net
+                                    input_tensor = torch.FloatTensor(combined_features).unsqueeze(0)
+                        except:
+                            # Default to temporal averaging if we can't determine
+                            averaged_features = np.mean(combined_features, axis=1)  # Average across time
+                            input_tensor = torch.FloatTensor(averaged_features).unsqueeze(0)
+                            print(f"Using temporal averaging for prediction (fallback): {averaged_features.shape}")
+                    else:
+                        raise ValueError(f"Insufficient bands for temporal processing: got {n_bands}, expected at least {n_temporal_expected}")
+                
                 if torch.cuda.is_available():
-                    batch = batch.cuda()
-                pred = model(batch)
-                predictions.extend(pred.cpu().numpy())
-            predictions = np.array(predictions)
-    print(f"Generated {len(predictions)} predictions")
-    output_path = Path(args.output_dir) / f"{Path(args.stack).stem.replace('stack_', 'predictCH')}_{ch_col}.tif"
+                    input_tensor = input_tensor.cuda()
+                    model = model.cuda()
+                
+                predictions = model(input_tensor)
+                predictions = predictions.squeeze().cpu().numpy()
+        
+        # Save prediction
+        if args.prediction_output is None:
+            patch_name = os.path.splitext(os.path.basename(args.patch_path))[0]
+            pred_filename = f"prediction_{args.model}_{patch_name}.tif"
+            prediction_path = os.path.join(args.output_dir, pred_filename)
+        else:
+            prediction_path = args.prediction_output
+        
+        # Save with same georeference as input patch
+        with rasterio.open(args.patch_path) as src:
+            profile = src.profile.copy()
+            profile.update(count=1, dtype='float32')
+            
+            with rasterio.open(prediction_path, 'w', **profile) as dst:
+                dst.write(predictions.astype('float32'), 1)
+        
+        print(f"Saved prediction to: {prediction_path}")
     
-    # Save predictions
-    # output_path = os.path.join(args.output_dir, output_filename)
-    print(f"Saving predictions to: {output_path}")
-    save_predictions(predictions, src, output_path, args.mask)
-    print("Done!")
+    print("\\nTraining completed successfully!")
 
 if __name__ == "__main__":
     main()

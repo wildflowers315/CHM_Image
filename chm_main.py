@@ -763,7 +763,7 @@ def main():
             # Export GEDI vector points as CSV and GeoJSON
             geojson_name = os.path.splitext(os.path.basename(args.aoi))[0]
             prefix = f"{geojson_name}_{patch_id}"
-            export_gedi_vector_points(gedi_fc, prefix)
+            # export_gedi_vector_points(gedi_fc, prefix)
             
             # Convert GEDI vector data to raster for the patch data
             if gedi_fc is not None:
@@ -800,7 +800,7 @@ def main():
                 )
                 export_task.start()
                 print(f"Started export for {patch_id} with fileNamePrefix: {fileNamePrefix}")
-                break  # Only export the first patch for now (testing)
+                # break  # Only export the first patch for now (testing)
     else:
         # Fallback: process whole AOI as before
         print("Processing whole AOI (not patch-based)...")
