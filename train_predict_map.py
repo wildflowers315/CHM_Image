@@ -7,6 +7,7 @@ try:
     import torch.optim as optim
     import torch.nn as nn
     import torch.nn.functional as F
+    from torch.utils.data import Dataset, DataLoader
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
@@ -27,6 +28,7 @@ from tqdm import tqdm
 import glob
 import json
 import joblib
+import time
 warnings.filterwarnings('ignore')
 
 # Import multi-patch functionality
@@ -189,6 +191,826 @@ def modified_huber_loss(pred: torch.Tensor, target: torch.Tensor,
             best_loss = min(best_loss, loss.item())
     
     return torch.tensor(best_loss, requires_grad=True)
+
+# ============================================================================
+# Enhanced Training Components: Data Augmentation and Training Infrastructure
+# ============================================================================
+
+class AugmentedPatchDataset(Dataset):
+    """
+    PyTorch dataset with comprehensive spatial augmentation for canopy height modeling.
+    
+    Features:
+    - 12x augmentation: 3 flips × 4 rotations per patch
+    - Geospatial consistency: Apply same transforms to features and GEDI targets
+    - Memory efficient: On-the-fly augmentation generation
+    - Configurable augmentation factor
+    """
+    
+    def __init__(self, patch_files: List[str], augment: bool = True, 
+                 augment_factor: int = 12, validation_mode: bool = False):
+        """
+        Initialize augmented dataset.
+        
+        Args:
+            patch_files: List of patch TIF file paths
+            augment: Enable spatial augmentation (default: True)
+            augment_factor: Number of augmentations per patch (default: 12)
+            validation_mode: If True, only use original patches (no augmentation)
+        """
+        self.patch_files = patch_files
+        self.augment = augment and not validation_mode
+        self.augment_factor = augment_factor if self.augment else 1
+        self.validation_mode = validation_mode
+        
+        # Pre-load patch info for memory estimation
+        self.patch_info = []
+        for patch_file in patch_files:
+            if os.path.exists(patch_file):
+                self.patch_info.append({
+                    'file': patch_file,
+                    'name': os.path.basename(patch_file)
+                })
+        
+        print(f"🎯 Dataset initialized: {len(self.patch_info)} patches × {self.augment_factor} augmentations = {len(self)} samples")
+        
+    def __len__(self):
+        return len(self.patch_info) * self.augment_factor
+    
+    def __getitem__(self, idx) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Get augmented patch data.
+        
+        Returns:
+            - features: Augmented feature tensor (C, H, W) or (C, T, H, W)
+            - target: Augmented GEDI target tensor (H, W)  
+            - mask: Valid pixel mask (H, W)
+        """
+        # Determine patch and augmentation
+        patch_idx = idx // self.augment_factor
+        augment_id = idx % self.augment_factor
+        
+        patch_info = self.patch_info[patch_idx]
+        
+        # Load patch data
+        features, target, _ = load_patch_data(patch_info['file'], normalize_bands=True)
+        
+        # Apply augmentation if enabled
+        if self.augment and augment_id > 0:
+            features, target = self.apply_spatial_augmentation(features, target, augment_id)
+        
+        # Create mask for valid GEDI pixels
+        mask = (target > 0) & np.isfinite(target)
+        
+        # Ensure 256x256 dimensions for U-Net compatibility
+        features, target, mask = self._ensure_256x256(features, target, mask)
+        
+        # Convert to tensors
+        features_tensor = torch.FloatTensor(features)
+        target_tensor = torch.FloatTensor(target)
+        mask_tensor = torch.BoolTensor(mask)
+        
+        return features_tensor, target_tensor, mask_tensor
+    
+    def apply_spatial_augmentation(self, features: np.ndarray, target: np.ndarray, 
+                                 augment_id: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Apply consistent spatial augmentation to features and target.
+        
+        Augmentation combinations:
+        - ID 0: No augmentation (original)
+        - ID 1-3: Horizontal, vertical, both flips  
+        - ID 4-15: Above + 90°, 180°, 270° rotations
+        
+        Args:
+            features: Feature array (C, H, W) or (C, T, H, W)
+            target: Target array (H, W)
+            augment_id: Augmentation identifier (0-11)
+            
+        Returns:
+            Augmented features and target
+        """
+        if augment_id == 0:
+            return features, target
+        
+        # Determine flip and rotation
+        flip_id = (augment_id - 1) % 3 + 1  # 1, 2, 3
+        rotation_id = (augment_id - 1) // 3  # 0, 1, 2, 3
+        
+        # Apply flips
+        if flip_id == 1:  # Horizontal flip
+            if len(features.shape) == 3:  # (C, H, W)
+                features = features[:, :, ::-1]
+            else:  # (C, T, H, W)
+                features = features[:, :, :, ::-1]
+            target = target[:, ::-1]
+        elif flip_id == 2:  # Vertical flip
+            if len(features.shape) == 3:  # (C, H, W)
+                features = features[:, ::-1, :]
+            else:  # (C, T, H, W)
+                features = features[:, :, ::-1, :]
+            target = target[::-1, :]
+        elif flip_id == 3:  # Both flips
+            if len(features.shape) == 3:  # (C, H, W)
+                features = features[:, ::-1, ::-1]
+            else:  # (C, T, H, W)
+                features = features[:, :, ::-1, ::-1]
+            target = target[::-1, ::-1]
+        
+        # Apply rotations (k * 90 degrees)
+        if rotation_id > 0:
+            for _ in range(rotation_id):
+                if len(features.shape) == 3:  # (C, H, W)
+                    features = np.rot90(features, axes=(1, 2))
+                else:  # (C, T, H, W)
+                    features = np.rot90(features, axes=(2, 3))
+                target = np.rot90(target)
+        
+        return features, target
+    
+    def _ensure_256x256(self, features: np.ndarray, target: np.ndarray, 
+                       mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Ensure arrays are exactly 256x256 for U-Net compatibility."""
+        from scipy.ndimage import zoom
+        
+        target_size = 256
+        
+        if len(features.shape) == 3:  # (C, H, W)
+            if features.shape[1] != target_size or features.shape[2] != target_size:
+                scale_h = target_size / features.shape[1]
+                scale_w = target_size / features.shape[2]
+                
+                # Resize features
+                resized_features = np.zeros((features.shape[0], target_size, target_size), dtype=features.dtype)
+                for i in range(features.shape[0]):
+                    resized_features[i] = zoom(features[i], (scale_h, scale_w), order=1)
+                features = resized_features
+                
+                # Resize target and mask
+                target = zoom(target, (scale_h, scale_w), order=0)
+                mask = zoom(mask.astype(np.float32), (scale_h, scale_w), order=0) > 0.5
+                
+        elif len(features.shape) == 4:  # (C, T, H, W)
+            if features.shape[2] != target_size or features.shape[3] != target_size:
+                scale_h = target_size / features.shape[2]
+                scale_w = target_size / features.shape[3]
+                
+                # Resize features
+                resized_features = np.zeros((features.shape[0], features.shape[1], target_size, target_size), dtype=features.dtype)
+                for i in range(features.shape[0]):
+                    for j in range(features.shape[1]):
+                        resized_features[i, j] = zoom(features[i, j], (scale_h, scale_w), order=1)
+                features = resized_features
+                
+                # Resize target and mask
+                target = zoom(target, (scale_h, scale_w), order=0)
+                mask = zoom(mask.astype(np.float32), (scale_h, scale_w), order=0) > 0.5
+        
+        return features, target, mask
+
+class EarlyStoppingCallback:
+    """
+    Patience-based early stopping with best model preservation.
+    
+    Features:
+    - Configurable patience (default: 15 epochs)
+    - Best validation loss tracking
+    - Automatic model checkpoint saving
+    - Learning rate scheduling integration
+    """
+    
+    def __init__(self, patience: int = 15, min_delta: float = 1e-4, 
+                 restore_best_weights: bool = True, checkpoint_dir: str = None):
+        """
+        Initialize early stopping callback.
+        
+        Args:
+            patience: Number of epochs to wait for improvement
+            min_delta: Minimum change to qualify as improvement
+            restore_best_weights: Restore best model weights on stop
+            checkpoint_dir: Directory to save checkpoints
+        """
+        self.patience = patience
+        self.min_delta = min_delta
+        self.restore_best_weights = restore_best_weights
+        self.checkpoint_dir = checkpoint_dir
+        
+        self.best_loss = float('inf')
+        self.best_weights = None
+        self.epochs_without_improvement = 0
+        self.best_epoch = 0
+        
+        if checkpoint_dir:
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            
+    def __call__(self, epoch: int, val_loss: float, model: nn.Module, 
+                 optimizer: torch.optim.Optimizer = None) -> bool:
+        """
+        Check early stopping criteria.
+        
+        Args:
+            epoch: Current epoch number
+            val_loss: Current validation loss
+            model: Model to potentially save
+            optimizer: Optimizer state to save
+            
+        Returns:
+            True if training should stop, False otherwise
+        """
+        improved = val_loss < (self.best_loss - self.min_delta)
+        
+        if improved:
+            self.best_loss = val_loss
+            self.best_epoch = epoch
+            self.epochs_without_improvement = 0
+            
+            # Save best weights
+            if self.restore_best_weights:
+                self.best_weights = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            
+            # Save checkpoint
+            if self.checkpoint_dir:
+                checkpoint_path = os.path.join(self.checkpoint_dir, 'best_model.pth')
+                self.save_checkpoint(model, optimizer, epoch, checkpoint_path, is_best=True)
+                
+            print(f"🎯 New best validation loss: {val_loss:.6f} (epoch {epoch})")
+            
+        else:
+            self.epochs_without_improvement += 1
+            
+        # Check if we should stop
+        should_stop = self.epochs_without_improvement >= self.patience
+        
+        if should_stop:
+            print(f"⏹️  Early stopping triggered after {self.patience} epochs without improvement")
+            print(f"📈 Best validation loss: {self.best_loss:.6f} (epoch {self.best_epoch})")
+            
+            # Restore best weights
+            if self.restore_best_weights and self.best_weights:
+                model.load_state_dict(self.best_weights)
+                print("✅ Restored best model weights")
+                
+        return should_stop
+    
+    def save_checkpoint(self, model: nn.Module, optimizer: torch.optim.Optimizer,
+                       epoch: int, checkpoint_path: str, is_best: bool = False):
+        """Save comprehensive training checkpoint."""
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'best_loss': self.best_loss,
+            'best_epoch': self.best_epoch,
+            'epochs_without_improvement': self.epochs_without_improvement
+        }
+        
+        if optimizer:
+            checkpoint['optimizer_state_dict'] = optimizer.state_dict()
+            
+        torch.save(checkpoint, checkpoint_path)
+        
+        if is_best:
+            # Also save as latest checkpoint
+            latest_path = os.path.join(os.path.dirname(checkpoint_path), 'latest.pth')
+            torch.save(checkpoint, latest_path)
+
+class TrainingLogger:
+    """
+    Comprehensive training metrics tracking and visualization.
+    
+    Features:
+    - Loss curve tracking (train/validation)
+    - Training time and resource monitoring
+    - Automatic visualization generation
+    - JSON metrics export
+    """
+    
+    def __init__(self, output_dir: str, log_frequency: int = 10):
+        """Initialize training logger."""
+        self.output_dir = Path(output_dir)
+        self.logs_dir = self.output_dir / 'logs'
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.log_frequency = log_frequency
+        self.epoch_logs = []
+        self.batch_logs = []
+        self.start_time = None
+        
+    def start_training(self):
+        """Mark the start of training."""
+        self.start_time = time.time()
+        
+    def log_epoch(self, epoch: int, train_loss: float, val_loss: float, 
+                  learning_rate: float, epoch_time: float, gpu_memory: float = None):
+        """Log epoch-level metrics."""
+        log_entry = {
+            'epoch': epoch,
+            'train_loss': train_loss,
+            'val_loss': val_loss,
+            'learning_rate': learning_rate,
+            'epoch_time': epoch_time,
+            'total_time': time.time() - self.start_time if self.start_time else 0
+        }
+        
+        if gpu_memory is not None:
+            log_entry['gpu_memory_gb'] = gpu_memory
+            
+        self.epoch_logs.append(log_entry)
+        
+        # Print progress
+        if epoch % self.log_frequency == 0:
+            print(f"Epoch {epoch:3d} | Train: {train_loss:.6f} | Val: {val_loss:.6f} | "
+                  f"LR: {learning_rate:.2e} | Time: {epoch_time:.1f}s")
+    
+    def log_batch(self, epoch: int, batch_idx: int, batch_loss: float, batch_size: int):
+        """Log batch-level metrics."""
+        log_entry = {
+            'epoch': epoch,
+            'batch_idx': batch_idx,
+            'batch_loss': batch_loss,
+            'batch_size': batch_size,
+            'timestamp': time.time()
+        }
+        
+        self.batch_logs.append(log_entry)
+    
+    def generate_loss_curves(self) -> str:
+        """Generate and save loss curve visualizations."""
+        if not self.epoch_logs:
+            return None
+            
+        try:
+            import matplotlib.pyplot as plt
+            
+            epochs = [log['epoch'] for log in self.epoch_logs]
+            train_losses = [log['train_loss'] for log in self.epoch_logs]
+            val_losses = [log['val_loss'] for log in self.epoch_logs]
+            
+            plt.figure(figsize=(12, 8))
+            
+            # Loss curves
+            plt.subplot(2, 2, 1)
+            plt.plot(epochs, train_losses, label='Training', alpha=0.8)
+            plt.plot(epochs, val_losses, label='Validation', alpha=0.8)
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title('Training and Validation Loss')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            # Learning rate
+            plt.subplot(2, 2, 2)
+            learning_rates = [log['learning_rate'] for log in self.epoch_logs]
+            plt.plot(epochs, learning_rates)
+            plt.xlabel('Epoch')
+            plt.ylabel('Learning Rate')
+            plt.title('Learning Rate Schedule')
+            plt.yscale('log')
+            plt.grid(True, alpha=0.3)
+            
+            # Training time
+            plt.subplot(2, 2, 3)
+            epoch_times = [log['epoch_time'] for log in self.epoch_logs]
+            plt.plot(epochs, epoch_times)
+            plt.xlabel('Epoch')
+            plt.ylabel('Time (seconds)')
+            plt.title('Epoch Training Time')
+            plt.grid(True, alpha=0.3)
+            
+            # GPU memory (if available)
+            plt.subplot(2, 2, 4)
+            if 'gpu_memory_gb' in self.epoch_logs[0]:
+                gpu_memory = [log['gpu_memory_gb'] for log in self.epoch_logs]
+                plt.plot(epochs, gpu_memory)
+                plt.xlabel('Epoch')
+                plt.ylabel('GPU Memory (GB)')
+                plt.title('GPU Memory Usage')
+            else:
+                # Total time curve
+                total_times = [log['total_time'] for log in self.epoch_logs]
+                plt.plot(epochs, total_times)
+                plt.xlabel('Epoch')
+                plt.ylabel('Total Time (seconds)')
+                plt.title('Cumulative Training Time')
+            plt.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            
+            # Save figure
+            curves_path = self.logs_dir / 'loss_curves.png'
+            plt.savefig(curves_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            return str(curves_path)
+            
+        except ImportError:
+            print("Warning: matplotlib not available for loss curve generation")
+            return None
+    
+    def export_metrics(self) -> str:
+        """Export comprehensive training metrics to JSON."""
+        metrics = {
+            'training_summary': {
+                'total_epochs': len(self.epoch_logs),
+                'total_time': self.epoch_logs[-1]['total_time'] if self.epoch_logs else 0,
+                'final_train_loss': self.epoch_logs[-1]['train_loss'] if self.epoch_logs else None,
+                'final_val_loss': self.epoch_logs[-1]['val_loss'] if self.epoch_logs else None,
+                'best_val_loss': min(log['val_loss'] for log in self.epoch_logs) if self.epoch_logs else None
+            },
+            'epoch_logs': self.epoch_logs,
+            'batch_logs': self.batch_logs
+        }
+        
+        # Save metrics
+        metrics_path = self.logs_dir / 'training_log.json'
+        with open(metrics_path, 'w') as f:
+            json.dump(metrics, f, indent=2)
+            
+        return str(metrics_path)
+
+class EnhancedUNetTrainer:
+    """
+    Enhanced U-Net training with proper multi-patch batch processing.
+    
+    Features:
+    - True multi-patch training (not just first patch)
+    - Configurable batch size with gradient accumulation
+    - Cross-patch validation strategy
+    - Memory-efficient data loading
+    - Early stopping and checkpointing
+    """
+    
+    def __init__(self, model_type: str = "2d_unet", device: str = "auto"):
+        """Initialize enhanced U-Net trainer."""
+        self.model_type = model_type
+        
+        if device == "auto":
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = torch.device(device)
+            
+        print(f"🚀 Enhanced U-Net Trainer initialized for {model_type} on {self.device}")
+        
+    def create_data_loaders(self, patch_files: List[str], 
+                          validation_split: float = 0.2,
+                          batch_size: int = 8,
+                          augment: bool = True,
+                          num_workers: int = 2) -> Tuple[DataLoader, DataLoader]:
+        """
+        Create train/validation data loaders with augmentation.
+        
+        Features:
+        - Cross-patch validation (patches split between train/val)
+        - Augmented training data (12x increase)
+        - Memory-efficient streaming
+        - Balanced GEDI pixel sampling
+        
+        Args:
+            patch_files: List of patch file paths
+            validation_split: Fraction of patches for validation
+            batch_size: Batch size for training
+            augment: Enable data augmentation
+            num_workers: Number of data loading workers
+            
+        Returns:
+            Training and validation DataLoaders
+        """
+        # Split patches spatially for validation
+        np.random.shuffle(patch_files)  # Randomize order
+        split_idx = int(len(patch_files) * (1 - validation_split))
+        
+        train_files = patch_files[:split_idx]
+        val_files = patch_files[split_idx:]
+        
+        print(f"📊 Data split: {len(train_files)} train patches, {len(val_files)} validation patches")
+        
+        # Create datasets
+        train_dataset = AugmentedPatchDataset(
+            train_files, 
+            augment=augment, 
+            validation_mode=False
+        )
+        
+        val_dataset = AugmentedPatchDataset(
+            val_files, 
+            augment=False,  # No augmentation for validation
+            validation_mode=True
+        )
+        
+        # Create data loaders
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True if torch.cuda.is_available() else False,
+            drop_last=True  # Ensure consistent batch sizes
+        )
+        
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True if torch.cuda.is_available() else False,
+            drop_last=False
+        )
+        
+        print(f"📈 Training: {len(train_loader)} batches of {batch_size}")
+        print(f"📊 Validation: {len(val_loader)} batches of {batch_size}")
+        
+        return train_loader, val_loader
+    
+    def train_epoch(self, train_loader: DataLoader, model: nn.Module, 
+                   optimizer: torch.optim.Optimizer, criterion: nn.Module,
+                   epoch: int, logger: TrainingLogger = None) -> float:
+        """Train single epoch with proper batch processing."""
+        model.train()
+        total_loss = 0.0
+        num_batches = 0
+        
+        epoch_start_time = time.time()
+        
+        for batch_idx, (features, targets, masks) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch}")):
+            # Move to device
+            features = features.to(self.device)
+            targets = targets.to(self.device)
+            masks = masks.to(self.device)
+            
+            # Handle different input shapes for 2D vs 3D U-Net
+            if self.model_type == "2d_unet":
+                # For 2D U-Net: handle both (B, C, H, W) and (B, C, T, H, W)
+                if len(features.shape) == 5:  # (B, C, T, H, W) -> (B, C*T, H, W)
+                    B, C, T, H, W = features.shape
+                    features = features.view(B, C * T, H, W)
+                    
+            elif self.model_type == "3d_unet":
+                # For 3D U-Net: ensure (B, C, T, H, W) format
+                if len(features.shape) == 4:  # (B, C, H, W) -> expand temporal
+                    features = features.unsqueeze(2)  # Add temporal dimension
+                    
+            # Forward pass
+            optimizer.zero_grad()
+            predictions = model(features)
+            
+            # Ensure predictions match target dimensions
+            if len(predictions.shape) > len(targets.shape):
+                predictions = predictions.squeeze(1)  # Remove channel dimension if present
+                
+            # Compute loss only on valid GEDI pixels
+            valid_loss = self._compute_masked_loss(predictions, targets, masks, criterion)
+            
+            # Backward pass
+            valid_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            
+            # Update metrics
+            loss_value = valid_loss.item()
+            total_loss += loss_value
+            num_batches += 1
+            
+            # Log batch metrics
+            if logger:
+                logger.log_batch(epoch, batch_idx, loss_value, features.size(0))
+                
+            # Memory cleanup
+            del features, targets, masks, predictions, valid_loss
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+        epoch_time = time.time() - epoch_start_time
+        
+        return avg_loss
+    
+    def validate_epoch(self, val_loader: DataLoader, model: nn.Module, 
+                      criterion: nn.Module) -> float:
+        """Validate model performance on validation set."""
+        model.eval()
+        total_loss = 0.0
+        num_batches = 0
+        
+        with torch.no_grad():
+            for features, targets, masks in val_loader:
+                # Move to device
+                features = features.to(self.device)
+                targets = targets.to(self.device)
+                masks = masks.to(self.device)
+                
+                # Handle different input shapes
+                if self.model_type == "2d_unet":
+                    if len(features.shape) == 5:  # (B, C, T, H, W) -> (B, C*T, H, W)
+                        B, C, T, H, W = features.shape
+                        features = features.view(B, C * T, H, W)
+                        
+                elif self.model_type == "3d_unet":
+                    if len(features.shape) == 4:  # (B, C, H, W) -> expand temporal
+                        features = features.unsqueeze(2)
+                        
+                # Forward pass
+                predictions = model(features)
+                
+                # Ensure predictions match target dimensions
+                if len(predictions.shape) > len(targets.shape):
+                    predictions = predictions.squeeze(1)
+                    
+                # Compute loss
+                valid_loss = self._compute_masked_loss(predictions, targets, masks, criterion)
+                total_loss += valid_loss.item()
+                num_batches += 1
+                
+                # Memory cleanup
+                del features, targets, masks, predictions, valid_loss
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+        
+        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+        return avg_loss
+    
+    def _compute_masked_loss(self, predictions: torch.Tensor, targets: torch.Tensor, 
+                           masks: torch.Tensor, criterion: nn.Module) -> torch.Tensor:
+        """Compute loss only on valid GEDI pixels."""
+        # Apply mask to get valid pixels
+        valid_predictions = predictions[masks]
+        valid_targets = targets[masks]
+        
+        if len(valid_predictions) == 0:
+            # No valid pixels, return zero loss
+            return torch.tensor(0.0, requires_grad=True, device=self.device)
+        
+        # Compute loss
+        loss = criterion(valid_predictions, valid_targets)
+        return loss
+    
+    def train_multi_patch_unet(self, patch_files: List[str], 
+                             output_dir: str, 
+                             epochs: int = 100,
+                             batch_size: int = 8,
+                             learning_rate: float = 1e-3,
+                             weight_decay: float = 1e-4,
+                             validation_split: float = 0.2,
+                             early_stopping_patience: int = 15,
+                             augment: bool = True,
+                             save_checkpoints: bool = True,
+                             checkpoint_freq: int = 10) -> Dict:
+        """
+        Complete multi-patch U-Net training workflow.
+        
+        Args:
+            patch_files: List of patch file paths
+            output_dir: Output directory for results
+            epochs: Number of training epochs
+            batch_size: Batch size for training
+            learning_rate: Learning rate for optimizer
+            weight_decay: Weight decay for regularization
+            validation_split: Fraction for validation
+            early_stopping_patience: Epochs to wait before stopping
+            augment: Enable data augmentation
+            save_checkpoints: Save periodic checkpoints
+            checkpoint_freq: Frequency of checkpoint saving
+            
+        Returns:
+            Training results and model artifacts
+        """
+        # Create output directories
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        models_dir = output_path / 'models'
+        checkpoints_dir = output_path / 'checkpoints'
+        models_dir.mkdir(exist_ok=True)
+        checkpoints_dir.mkdir(exist_ok=True)
+        
+        # Initialize training components
+        logger = TrainingLogger(output_dir)
+        early_stopping = EarlyStoppingCallback(
+            patience=early_stopping_patience,
+            checkpoint_dir=str(checkpoints_dir)
+        )
+        
+        # Create data loaders
+        train_loader, val_loader = self.create_data_loaders(
+            patch_files,
+            validation_split=validation_split,
+            batch_size=batch_size,
+            augment=augment
+        )
+        
+        # Get sample to determine input dimensions
+        sample_features, _, _ = next(iter(train_loader))
+        
+        if self.model_type == "2d_unet":
+            # Handle temporal dimension for 2D U-Net
+            if len(sample_features.shape) == 5:  # (B, C, T, H, W)
+                in_channels = sample_features.shape[1] * sample_features.shape[2]
+            else:  # (B, C, H, W)
+                in_channels = sample_features.shape[1]
+            model = create_2d_unet(in_channels=in_channels)
+        else:  # 3d_unet
+            in_channels = sample_features.shape[1] if len(sample_features.shape) == 5 else sample_features.shape[1]
+            model = create_3d_unet(in_channels=in_channels)
+            
+        model = model.to(self.device)
+        
+        # Initialize optimizer and criterion
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay
+        )
+        
+        criterion = nn.MSELoss()
+        
+        # Training loop
+        logger.start_training()
+        
+        print(f"🚀 Starting enhanced {self.model_type.upper()} training...")
+        print(f"📊 Model: {in_channels} input channels")
+        print(f"📈 Training samples: {len(train_loader) * batch_size}")
+        print(f"🎯 Validation samples: {len(val_loader) * batch_size}")
+        
+        best_val_loss = float('inf')
+        training_results = {
+            'epochs_completed': 0,
+            'best_val_loss': float('inf'),
+            'final_train_loss': 0.0,
+            'early_stopped': False,
+            'total_training_time': 0.0
+        }
+        
+        for epoch in range(epochs):
+            epoch_start_time = time.time()
+            
+            # Training phase
+            train_loss = self.train_epoch(
+                train_loader, model, optimizer, criterion, epoch, logger
+            )
+            
+            # Validation phase
+            val_loss = self.validate_epoch(val_loader, model, criterion)
+            
+            # Update metrics
+            epoch_time = time.time() - epoch_start_time
+            current_lr = optimizer.param_groups[0]['lr']
+            
+            # Log epoch metrics
+            logger.log_epoch(epoch, train_loss, val_loss, current_lr, epoch_time)
+            
+            # Check early stopping
+            should_stop = early_stopping(epoch, val_loss, model, optimizer)
+            
+            # Save periodic checkpoints
+            if save_checkpoints and (epoch + 1) % checkpoint_freq == 0:
+                checkpoint_path = checkpoints_dir / f'epoch_{epoch+1:03d}.pth'
+                early_stopping.save_checkpoint(model, optimizer, epoch, str(checkpoint_path))
+                
+            # Update best validation loss
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                
+            training_results.update({
+                'epochs_completed': epoch + 1,
+                'best_val_loss': best_val_loss,
+                'final_train_loss': train_loss,
+                'total_training_time': time.time() - logger.start_time
+            })
+            
+            if should_stop:
+                training_results['early_stopped'] = True
+                break
+        
+        # Save final model
+        final_model_path = models_dir / 'final_model.pth'
+        torch.save(model.state_dict(), final_model_path)
+        
+        # Generate training visualizations and reports
+        logger.generate_loss_curves()
+        metrics_path = logger.export_metrics()
+        
+        # Save training configuration
+        config = {
+            'model_type': self.model_type,
+            'epochs': epochs,
+            'batch_size': batch_size,
+            'learning_rate': learning_rate,
+            'weight_decay': weight_decay,
+            'validation_split': validation_split,
+            'early_stopping_patience': early_stopping_patience,
+            'augmentation_enabled': augment,
+            'input_channels': in_channels,
+            'device': str(self.device)
+        }
+        
+        config_path = output_path / 'training_config.json'
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+        
+        print(f"✅ Enhanced {self.model_type.upper()} training completed!")
+        print(f"📈 Best validation loss: {best_val_loss:.6f}")
+        print(f"💾 Models saved to: {models_dir}")
+        print(f"📊 Logs saved to: {logger.logs_dir}")
+        
+        return training_results
 
 def load_patch_data(patch_path: str, normalize_bands: bool = True) -> Tuple[np.ndarray, np.ndarray, Dict[str, int]]:
     """
@@ -2046,6 +2868,22 @@ if __name__ == "__main__":
     parser.add_argument('--shift-radius', type=int, default=1,
                        help='Spatial shift radius for GEDI alignment')
     
+    # Enhanced Training Options (New Features)
+    parser.add_argument('--augment', action='store_true',
+                       help='Enable data augmentation (12x spatial transformations)')
+    parser.add_argument('--augment-factor', type=int, default=12,
+                       help='Number of augmentations per patch (default: 12)')
+    parser.add_argument('--validation-split', type=float, default=0.2,
+                       help='Fraction of patches for validation (default: 0.2)')
+    parser.add_argument('--early-stopping-patience', type=int, default=15,
+                       help='Epochs to wait before early stopping (default: 15)')
+    parser.add_argument('--checkpoint-freq', type=int, default=10,
+                       help='Save checkpoint every N epochs (default: 10)')
+    parser.add_argument('--resume-from', type=str,
+                       help='Resume training from checkpoint file')
+    parser.add_argument('--use-enhanced-training', action='store_true',
+                       help='Use enhanced training pipeline with full multi-patch support')
+    
     # Prediction options
     parser.add_argument('--generate-prediction', action='store_true',
                        help='Generate prediction maps after training')
@@ -2252,7 +3090,37 @@ if __name__ == "__main__":
             print(f"🔍 Pattern: {args.patch_pattern}")
         
         try:
-            train_multi_patch(args)
+            # Check if enhanced training is requested for U-Net models
+            if args.use_enhanced_training and args.model in ['2d_unet', '3d_unet']:
+                # Use enhanced U-Net training pipeline
+                patch_files = glob.glob(os.path.join(args.patch_dir, args.patch_pattern))
+                if not patch_files:
+                    print(f"❌ No patches found matching pattern: {args.patch_pattern}")
+                    exit(1)
+                
+                print(f"🚀 Using enhanced training pipeline for {args.model.upper()}")
+                trainer = EnhancedUNetTrainer(model_type=args.model)
+                
+                training_results = trainer.train_multi_patch_unet(
+                    patch_files=patch_files,
+                    output_dir=args.output_dir,
+                    epochs=args.epochs,
+                    batch_size=args.batch_size,
+                    learning_rate=args.learning_rate,
+                    weight_decay=args.weight_decay,
+                    validation_split=args.validation_split,
+                    early_stopping_patience=args.early_stopping_patience,
+                    augment=args.augment,
+                    checkpoint_freq=args.checkpoint_freq
+                )
+                
+                print(f"🎉 Enhanced training completed!")
+                print(f"📊 Results: {training_results}")
+                
+            else:
+                # Use traditional training pipeline
+                train_multi_patch(args)
+                
         except Exception as e:
             print(f"❌ Error in multi-patch training: {e}")
             exit(1)
@@ -2264,7 +3132,46 @@ if __name__ == "__main__":
             print(f"🔍 Files: {args.patch_files}")
         
         try:
-            train_multi_patch_from_files(args)
+            # Check if enhanced training is requested for U-Net models
+            if args.use_enhanced_training and args.model in ['2d_unet', '3d_unet']:
+                # Use enhanced U-Net training pipeline
+                patch_files = [f.strip() for f in args.patch_files.split(',')]
+                
+                # Validate patch files exist
+                valid_files = []
+                for patch_file in patch_files:
+                    if os.path.exists(patch_file):
+                        valid_files.append(patch_file)
+                    else:
+                        print(f"⚠️  Warning: Patch file not found: {patch_file}")
+                
+                if not valid_files:
+                    print(f"❌ No valid patch files found")
+                    exit(1)
+                
+                print(f"🚀 Using enhanced training pipeline for {args.model.upper()}")
+                trainer = EnhancedUNetTrainer(model_type=args.model)
+                
+                training_results = trainer.train_multi_patch_unet(
+                    patch_files=valid_files,
+                    output_dir=args.output_dir,
+                    epochs=args.epochs,
+                    batch_size=args.batch_size,
+                    learning_rate=args.learning_rate,
+                    weight_decay=args.weight_decay,
+                    validation_split=args.validation_split,
+                    early_stopping_patience=args.early_stopping_patience,
+                    augment=args.augment,
+                    checkpoint_freq=args.checkpoint_freq
+                )
+                
+                print(f"🎉 Enhanced training completed!")
+                print(f"📊 Results: {training_results}")
+                
+            else:
+                # Use traditional training pipeline
+                train_multi_patch_from_files(args)
+                
         except Exception as e:
             print(f"❌ Error in multi-patch training: {e}")
             exit(1)

@@ -865,4 +865,712 @@ class QualityController:
 4. **Cloud Integration**: Direct processing of patches from cloud storage
 5. **Machine Learning Optimization**: Learn optimal merging strategies from data
 
-This multi-patch enhancement will transform the current single-patch system into a production-ready large-area canopy height mapping solution, enabling seamless processing of continental-scale forest monitoring applications. 
+This multi-patch enhancement will transform the current single-patch system into a production-ready large-area canopy height mapping solution, enabling seamless processing of continental-scale forest monitoring applications.
+
+---
+
+# 🚧 Phase 3: Enhanced Training Strategy with Data Augmentation and Batch Processing
+
+## Status: 🔄 IN PROGRESS - Enhanced Training System Implementation
+
+This enhancement addresses the current limitations in `train_predict_map.py` by implementing comprehensive data augmentation, proper batch training, early stopping, and training persistence capabilities.
+
+## 10. Enhanced Training Strategy Design
+
+### 10.1 Current Training System Limitations Analysis
+
+Based on analysis of the current `train_predict_map.py`, the following limitations were identified:
+
+#### ❌ Current Limitations
+1. **No Data Augmentation**: No spatial transformations (rotations, flips, scaling)
+2. **Limited U-Net Batch Training**: U-Net models only train on first patch
+3. **Basic Early Stopping**: Limited validation and no patience-based stopping 
+4. **Memory Inefficiency**: Loads all patches into memory simultaneously
+5. **Minimal Training Persistence**: Limited checkpoint/resume capabilities
+
+#### ✅ Existing Capabilities  
+1. **Multi-Patch Support**: Directory-based patch loading with pattern matching
+2. **Basic Validation**: Train/test split for traditional models (RF/MLP)
+3. **Model Persistence**: Basic model saving for all architectures
+4. **Progress Tracking**: tqdm progress bars for training loops
+
+### 10.2 Enhanced Training Architecture
+
+#### 🎯 Core Enhancement Requirements
+1. **12x Data Augmentation**: 3 flips × 4 rotations = 720 effective images from 60 patches
+2. **True Multi-Patch Training**: All models train on all patches with proper batch processing
+3. **Early Stopping**: Patience-based validation with best model saving
+4. **Memory Efficiency**: Streaming data loading with configurable batch sizes
+5. **Training Persistence**: Comprehensive checkpointing and resume capabilities
+6. **Enhanced Validation**: Cross-patch validation with comprehensive metrics
+
+#### 🏗️ Enhanced System Components
+
+```python
+# 🔄 PLANNED: Enhanced training components for train_predict_map.py
+
+class AugmentedPatchDataset(Dataset):
+    """
+    PyTorch dataset with comprehensive spatial augmentation
+    
+    Features:
+    - 12x augmentation: 3 flips × 4 rotations per patch
+    - Geospatial consistency: Apply same transforms to features and GEDI targets
+    - Memory efficient: On-the-fly augmentation generation
+    - Configurable augmentation factor
+    """
+    
+    def __init__(self, patch_files: List[str], augment: bool = True, augment_factor: int = 12):
+        """
+        Initialize augmented dataset
+        
+        Args:
+            patch_files: List of patch TIF file paths
+            augment: Enable spatial augmentation (default: True)
+            augment_factor: Number of augmentations per patch (default: 12)
+        """
+        
+    def __getitem__(self, idx) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Get augmented patch data
+        
+        Returns:
+            - features: Augmented feature tensor (C, H, W) or (C, T, H, W)
+            - target: Augmented GEDI target tensor (H, W)
+            - mask: Valid pixel mask (H, W)
+        """
+        
+    def apply_spatial_augmentation(self, features: np.ndarray, target: np.ndarray, 
+                                 augment_id: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Apply consistent spatial augmentation to features and target
+        
+        Augmentation combinations:
+        - ID 0: No augmentation (original)
+        - ID 1-3: Horizontal, vertical, both flips
+        - ID 4-15: Above + 90°, 180°, 270° rotations
+        """
+
+class EarlyStoppingCallback:
+    """
+    Patience-based early stopping with best model preservation
+    
+    Features:
+    - Configurable patience (default: 15 epochs)
+    - Best validation loss tracking
+    - Automatic model checkpoint saving
+    - Learning rate scheduling integration
+    """
+    
+    def __init__(self, patience: int = 15, min_delta: float = 1e-4, 
+                 restore_best_weights: bool = True):
+        """
+        Initialize early stopping callback
+        
+        Args:
+            patience: Number of epochs to wait for improvement
+            min_delta: Minimum change to qualify as improvement
+            restore_best_weights: Restore best model weights on stop
+        """
+        
+    def __call__(self, epoch: int, val_loss: float, model: nn.Module) -> bool:
+        """
+        Check early stopping criteria
+        
+        Returns:
+            True if training should stop, False otherwise
+        """
+        
+    def save_checkpoint(self, model: nn.Module, optimizer: torch.optim.Optimizer,
+                       epoch: int, checkpoint_path: str):
+        """Save comprehensive training checkpoint"""
+
+class TrainingLogger:
+    """
+    Comprehensive training metrics tracking and visualization
+    
+    Features:
+    - Loss curve tracking (train/validation)
+    - Training time and resource monitoring
+    - Automatic visualization generation
+    - JSON metrics export
+    """
+    
+    def __init__(self, output_dir: str, log_frequency: int = 10):
+        """Initialize training logger"""
+        
+    def log_epoch(self, epoch: int, train_loss: float, val_loss: float, 
+                  learning_rate: float, epoch_time: float):
+        """Log epoch-level metrics"""
+        
+    def log_batch(self, batch_idx: int, batch_loss: float):
+        """Log batch-level metrics"""
+        
+    def generate_loss_curves(self) -> str:
+        """Generate and save loss curve visualizations"""
+        
+    def export_metrics(self) -> str:
+        """Export comprehensive training metrics to JSON"""
+
+class EnhancedUNetTrainer:
+    """
+    Enhanced U-Net training with proper multi-patch batch processing
+    
+    Features:
+    - True multi-patch training (not just first patch)
+    - Configurable batch size with gradient accumulation
+    - Mixed precision training support
+    - Cross-patch validation strategy
+    - Memory-efficient data loading
+    """
+    
+    def __init__(self, model_type: str = "2d_unet", device: str = "auto"):
+        """Initialize enhanced U-Net trainer"""
+        
+    def create_data_loaders(self, patch_files: List[str], 
+                          validation_split: float = 0.2,
+                          batch_size: int = 8) -> Tuple[DataLoader, DataLoader]:
+        """
+        Create train/validation data loaders with augmentation
+        
+        Features:
+        - Cross-patch validation (patches split between train/val)
+        - Augmented training data (12x increase)
+        - Memory-efficient streaming
+        - Balanced GEDI pixel sampling
+        """
+        
+    def train_epoch(self, train_loader: DataLoader, model: nn.Module, 
+                   optimizer: torch.optim.Optimizer, epoch: int) -> float:
+        """Train single epoch with proper batch processing"""
+        
+    def validate_epoch(self, val_loader: DataLoader, model: nn.Module) -> float:
+        """Validate model performance on validation set"""
+        
+    def train_multi_patch_unet(self, patch_files: List[str], 
+                             output_dir: str, **kwargs) -> Dict:
+        """
+        Complete multi-patch U-Net training workflow
+        
+        Returns:
+            Training results and model artifacts
+        """
+```
+
+### 10.3 Enhanced Command Line Interface
+
+#### 🔄 New Training Arguments
+
+```bash
+# 🔄 PLANNED: Enhanced train_predict_map.py CLI arguments
+
+# Basic augmentation and early stopping
+python train_predict_map.py \
+    --patch-dir "chm_outputs/patches/" \
+    --model 2d_unet \
+    --augment \
+    --augment-factor 12 \
+    --early-stopping-patience 15 \
+    --validation-split 0.8 \
+    --output-dir chm_outputs/enhanced_2d_unet
+
+# Advanced training with checkpointing  
+python train_predict_map.py \
+    --patch-dir "chm_outputs/patches/" \
+    --model 3d_unet \
+    --augment \
+    --batch-size 4 \
+    --epochs 100 \
+    --early-stopping-patience 20 \
+    --checkpoint-freq 10 \
+    --learning-rate 1e-3 \
+    --weight-decay 1e-4 \
+    --output-dir chm_outputs/enhanced_3d_unet
+
+# Resume training from checkpoint
+python train_predict_map.py \
+    --resume-from chm_outputs/enhanced_3d_unet/checkpoints/epoch_050.pth \
+    --patch-dir "chm_outputs/patches/" \
+    --model 3d_unet \
+    --output-dir chm_outputs/enhanced_3d_unet
+
+# Mixed precision training for large datasets
+python train_predict_map.py \
+    --patch-dir "chm_outputs/large_patches/" \
+    --model 3d_unet \
+    --augment \
+    --mixed-precision \
+    --gradient-accumulation-steps 4 \
+    --max-memory-gb 12 \
+    --output-dir chm_outputs/large_scale_3d_unet
+```
+
+### 10.4 Enhanced Output Structure
+
+#### 📁 Training Results Organization
+
+```
+chm_outputs/{model_type}_enhanced/
+├── models/
+│   ├── best_model.pth              # Best validation loss model
+│   ├── final_model.pth             # Final epoch model  
+│   ├── model_config.json           # Model architecture config
+│   └── training_config.json        # Training hyperparameters
+├── checkpoints/
+│   ├── epoch_010.pth               # Regular training checkpoints
+│   ├── epoch_020.pth
+│   └── latest.pth                  # Most recent checkpoint
+├── logs/
+│   ├── training_log.json           # Detailed training metrics
+│   ├── loss_curves.png             # Training/validation curves
+│   ├── learning_rate_schedule.png  # LR schedule visualization
+│   ├── augmentation_examples.png   # Sample augmented patches
+│   └── training_summary.txt        # Human-readable summary
+├── validation/
+│   ├── validation_results.json     # Cross-patch validation metrics
+│   ├── patch_performance.csv       # Per-patch validation scores
+│   └── confusion_analysis.png      # Height prediction analysis
+├── predictions/
+│   ├── patch0000_prediction.tif    # Individual patch predictions
+│   ├── patch0001_prediction.tif
+│   └── merged_prediction.tif       # Combined prediction map
+└── evaluation/
+    ├── model_performance.json      # Final evaluation metrics
+    ├── comparison_report.pdf       # Model comparison analysis
+    └── feature_importance.json     # Feature analysis (if applicable)
+```
+
+### 10.5 Memory Optimization Strategy
+
+#### 🧠 Efficient Memory Management
+
+```python
+# 🔄 PLANNED: Memory optimization for large-scale training
+
+class MemoryEfficientPatchLoader:
+    """
+    Memory-efficient patch loading with streaming capabilities
+    
+    Features:
+    - On-demand patch loading (not all in memory)
+    - Configurable memory budget
+    - Intelligent caching strategy
+    - Progress monitoring and estimation
+    """
+    
+    def __init__(self, max_memory_gb: float = 8.0, cache_size: int = 10):
+        """
+        Initialize memory-efficient loader
+        
+        Args:
+            max_memory_gb: Maximum memory budget for patch data
+            cache_size: Number of patches to keep in memory
+        """
+        
+    def estimate_memory_usage(self, patch_files: List[str]) -> float:
+        """Estimate memory requirements for patch collection"""
+        
+    def create_streaming_loader(self, patch_files: List[str], 
+                              batch_size: int) -> Iterator:
+        """Create streaming data loader for large patch collections"""
+
+class GradientAccumulation:
+    """
+    Gradient accumulation for training with large effective batch sizes
+    
+    Features:
+    - Simulates large batch training with limited GPU memory
+    - Automatic gradient scaling and normalization
+    - Compatible with mixed precision training
+    """
+    
+    def __init__(self, accumulation_steps: int = 4):
+        """Initialize gradient accumulation"""
+        
+    def backward_and_accumulate(self, loss: torch.Tensor, model: nn.Module,
+                               step: int, total_steps: int):
+        """Perform backward pass with gradient accumulation"""
+```
+
+### 10.6 Validation and Performance Monitoring
+
+#### 📈 Enhanced Validation Strategy
+
+```python
+# 🔄 PLANNED: Cross-patch validation with comprehensive metrics
+
+class CrossPatchValidator:
+    """
+    Cross-patch validation for spatial generalization assessment
+    
+    Features:
+    - Spatial train/validation split (avoid spatial leakage)
+    - Height-stratified validation (0-10m, 10-30m, 30m+)
+    - Forest type aware validation
+    - Temporal consistency validation (for 3D models)
+    """
+    
+    def __init__(self, validation_strategy: str = "spatial"):
+        """
+        Initialize cross-patch validator
+        
+        Args:
+            validation_strategy: "spatial", "random", "stratified"
+        """
+        
+    def split_patches_spatially(self, patch_files: List[str], 
+                               validation_fraction: float = 0.2) -> Tuple[List, List]:
+        """Split patches ensuring spatial separation"""
+        
+    def validate_height_stratified(self, predictions: np.ndarray, 
+                                  targets: np.ndarray, mask: np.ndarray) -> Dict:
+        """Compute height-stratified validation metrics"""
+        
+    def generate_validation_report(self, results: Dict, output_path: str):
+        """Generate comprehensive validation report"""
+
+class PerformanceMonitor:
+    """
+    Real-time training performance monitoring
+    
+    Features:
+    - GPU memory usage tracking
+    - Training speed estimation
+    - ETA calculation with early stopping
+    - Resource utilization alerts
+    """
+    
+    def __init__(self, log_interval: int = 100):
+        """Initialize performance monitor"""
+        
+    def log_performance_metrics(self, epoch: int, batch: int, 
+                               loss: float, gpu_memory: float):
+        """Log comprehensive performance metrics"""
+        
+    def estimate_training_time(self, current_epoch: int, total_epochs: int,
+                              early_stopping: EarlyStoppingCallback) -> str:
+        """Estimate remaining training time"""
+```
+
+### 10.7 Implementation Timeline
+
+#### 🗓️ Detailed Implementation Schedule
+
+**Week 1: Data Augmentation & Dataset Enhancement**
+- ✅ Implement `AugmentedPatchDataset` with 12x spatial transformations
+- ✅ Add geospatial consistency for feature-target augmentation
+- ✅ Create memory-efficient on-the-fly augmentation
+- ✅ Add augmentation visualization and validation
+
+**Week 2: Enhanced Training Pipeline**
+- 🔄 Implement `EnhancedUNetTrainer` for proper multi-patch training
+- 🔄 Add early stopping with patience and best model saving
+- 🔄 Integrate comprehensive training logging and monitoring
+- 🔄 Implement cross-patch validation strategy
+
+**Week 3: Memory Optimization & Checkpointing**
+- 📅 Add memory-efficient streaming data loaders
+- 📅 Implement gradient accumulation for large batch simulation
+- 📅 Add comprehensive checkpointing and resume functionality
+- 📅 Integrate mixed precision training support
+
+**Week 4: Integration & Advanced Features**
+- 📅 Update command line interface with new arguments
+- 📅 Add learning rate scheduling and optimization
+- 📅 Implement comprehensive evaluation and reporting
+- 📅 Create automated testing and validation suite
+
+### 10.8 Expected Performance Improvements
+
+#### 🎯 Training Enhancement Benefits
+
+**Data Augmentation Impact:**
+- **12x More Training Data**: 60 patches → 720 effective training samples
+- **Improved Generalization**: Reduced overfitting through spatial variation
+- **Better Edge Case Handling**: Models see rotated/flipped scenarios
+- **Robust Spatial Features**: Enhanced spatial invariance
+
+**Training Pipeline Improvements:**
+- **True Multi-Patch Training**: All models utilize full dataset
+- **Early Stopping**: Prevent overfitting and reduce training time
+- **Validation Consistency**: Cross-patch validation for spatial generalization
+- **Memory Efficiency**: Handle larger datasets within memory constraints
+
+**Production Readiness:**
+- **Training Persistence**: Resume training from interruptions
+- **Comprehensive Logging**: Full training history and analysis
+- **Model Comparison**: Systematic evaluation across augmentation strategies
+- **Reproducibility**: Fixed seeds and deterministic training
+
+### 10.9 Integration with Existing System
+
+#### 🔗 Backward Compatibility
+
+The enhanced training system maintains full backward compatibility:
+
+```python
+# ✅ Existing workflows continue to work unchanged
+python train_predict_map.py --patch-path single_patch.tif --model rf
+
+# 🆕 Enhanced workflows with new capabilities  
+python train_predict_map.py --patch-dir patches/ --model 2d_unet --augment
+
+# 🔄 Gradual adoption of enhanced features
+python train_predict_map.py --patch-dir patches/ --model mlp --validation-split 0.8
+```
+
+**Compatibility Features:**
+- ✅ All existing command line arguments preserved
+- ✅ Single-patch training workflows unchanged
+- ✅ Traditional model training (RF/MLP) enhanced but compatible
+- ✅ Output structure maintains existing file formats
+- ✅ Evaluation integration with existing metrics functions
+
+### 10.10 Quality Assurance and Testing
+
+#### 🧪 Comprehensive Testing Strategy
+
+```python
+# 🔄 PLANNED: Enhanced testing framework
+
+class TrainingSystemTests:
+    """Comprehensive testing for enhanced training system"""
+    
+    def test_augmentation_consistency(self):
+        """Verify augmentation preserves feature-target relationships"""
+        
+    def test_memory_efficiency(self):
+        """Validate memory usage stays within configured limits"""
+        
+    def test_early_stopping_functionality(self):
+        """Verify early stopping and best model restoration"""
+        
+    def test_checkpoint_resume(self):
+        """Validate training resumption from checkpoints"""
+        
+    def test_cross_patch_validation(self):
+        """Verify spatial validation split correctness"""
+
+# Automated testing suite
+python -m pytest tests/test_enhanced_training.py -v
+```
+
+**Testing Scope:**
+- 🧪 **Unit Tests**: Individual component functionality
+- 🧪 **Integration Tests**: End-to-end training workflows  
+- 🧪 **Performance Tests**: Memory usage and training speed
+- 🧪 **Regression Tests**: Ensure no performance degradation
+- 🧪 **Compatibility Tests**: Backward compatibility validation
+
+This enhanced training strategy transforms the current basic training into a robust, production-ready system with comprehensive data augmentation, proper validation, and enterprise-grade training persistence capabilities. 
+
+
+
+     │ Analysis of train_predict_map.py U-Net Training Approach                                                                      │     
+     │                                                                                                                               │     
+     │ Current Implementation Analysis                                                                                               │     
+     │                                                                                                                               │     
+     │ 1. Current Data Loading and Batch Processing                                                                                  │     
+     │                                                                                                                               │     
+     │ - Single Patch Processing: Current U-Net training uses single patch mode with fixed dimensions (256x256)                      │     
+     │ - Batch Size: Currently uses batch size of 1 (single patch per forward pass)                                                  │     
+     │ - Data Loading: Uses load_patch_data() function that loads entire patch into memory                                           │     
+     │ - Memory Management: Basic approach with automatic fallback from 3D to 2D U-Net when memory issues occur                      │     
+     │                                                                                                                               │     
+     │ 2. Existing Augmentation Capabilities                                                                                         │     
+     │                                                                                                                               │     
+     │ - Limited Augmentation: Currently imports ImprovedTemporalDataset from train_temporal_fixed.py for 3D U-Net, which has basic  │     
+     │ rotations and flips                                                                                                           │     
+     │ - Basic Transformations: 90°, 180°, 270° rotations and horizontal/vertical flips are available                                │     
+     │ - No Advanced Augmentation: Missing noise addition, scaling, elastic deformations, brightness/contrast adjustments            │     
+     │ - Temporal-Specific: Only 3D U-Net benefits from existing augmentation; 2D U-Net has no augmentation                          │     
+     │                                                                                                                               │     
+     │ 3. Training Loop Structure                                                                                                    │     
+     │                                                                                                                               │     
+     │ - Simple Training Loop: Basic epoch-based training with MSE loss on valid GEDI pixels only                                    │     
+     │ - No Validation Split: No proper train/validation split for early stopping                                                    │     
+     │ - No Learning Rate Scheduling: Fixed learning rate throughout training                                                        │     
+     │ - Basic Logging: Minimal progress tracking with loss printed every 10 epochs (2D) or 5 epochs (3D)                            │     
+     │                                                                                                                               │     
+     │ 4. Multi-patch Training Workflow                                                                                              │     
+     │                                                                                                                               │     
+     │ - Multi-patch Support Exists: Has train_multi_patch() functionality but limited                                               │     
+     │ - Current Limitation: For U-Net models, only trains on first patch and applies to all patches                                 │     
+     │ - No Unified Multi-patch Training: U-Net models don't leverage all patches for training simultaneously                        │     
+     │                                                                                                                               │     
+     │ 5. Early Stopping and Validation                                                                                              │     
+     │                                                                                                                               │     
+     │ - No Early Stopping: Training runs for fixed number of epochs without convergence monitoring                                  │     
+     │ - No Validation Metrics: No separate validation set to monitor overfitting                                                    │     
+     │ - Basic Best Model Tracking: Only tracks best loss during training, not validation performance                                │     
+     │                                                                                                                               │     
+     │ 6. Training Configuration                                                                                                     │     
+     │                                                                                                                               │     
+     │ - 2D U-Net: 50 epochs, 1e-3 learning rate, 32 base channels                                                                   │     
+     │ - 3D U-Net: 30 epochs, 1e-4 learning rate, 32 base channels (reduced for memory)                                              │     
+     │ - Hard-coded Parameters: Most parameters are fixed, limited flexibility                                                       │     
+     │                                                                                                                               │     
+     │ 7. Current Limitations Identified                                                                                             │     
+     │                                                                                                                               │     
+     │ Memory and Efficiency Issues:                                                                                                 │     
+     │                                                                                                                               │     
+     │ - Single patch per batch severely limits training efficiency                                                                  │     
+     │ - No gradient accumulation for effective larger batch sizes                                                                   │     
+     │ - Memory fallback approach is reactive rather than proactive                                                                  │     
+     │                                                                                                                               │     
+     │ Training Quality Issues:                                                                                                      │     
+     │                                                                                                                               │     
+     │ - No data augmentation for 2D U-Net                                                                                           │     
+     │ - Limited augmentation for 3D U-Net                                                                                           │     
+     │ - No validation monitoring or early stopping                                                                                  │     
+     │ - Fixed learning rate without scheduling                                                                                      │     
+     │ - Single patch training doesn't leverage multiple patches effectively                                                         │     
+     │                                                                                                                               │     
+     │ Multi-patch Integration Issues:                                                                                               │     
+     │                                                                                                                               │     
+     │ - U-Net models don't properly utilize multi-patch datasets                                                                    │     
+     │ - No batch processing across multiple patches                                                                                 │     
+     │ - Missing proper cross-validation across patches                                                                              │     
+     │                                                                                                                               │     
+     │ Enhancement Plan                                                                                                              │     
+     │                                                                                                                               │     
+     │ Phase 1: Enhanced Data Pipeline                                                                                               │     
+     │                                                                                                                               │     
+     │ 1. Implement proper batch processing with multiple patches per batch                                                          │     
+     │ 2. Add comprehensive data augmentation for both 2D and 3D U-Nets                                                              │     
+     │ 3. Create training/validation splits with proper cross-validation                                                             │     
+     │                                                                                                                               │     
+     │ Phase 2: Improved Training Loop                                                                                               │     
+     │                                                                                                                               │     
+     │ 1. Add early stopping with validation monitoring                                                                              │     
+     │ 2. Implement learning rate scheduling (ReduceLROnPlateau, CosineAnnealing)                                                    │     
+     │ 3. Add gradient accumulation for effective larger batch sizes                                                                 │     
+     │ 4. Enhanced logging and monitoring with validation metrics                                                                    │     
+     │                                                                                                                               │     
+     │ Phase 3: Multi-patch Integration                                                                                              │     
+     │                                                                                                                               │     
+     │ 1. Implement proper multi-patch batch training for U-Net models                                                               │     
+     │ 2. Add patch-aware cross-validation strategy                                                                                  │     
+     │ 3. Create unified multi-patch dataset class for seamless training                                                             │     
+     │                                                                                                                               │     
+     │ Phase 4: Advanced Features                                                                                                    │     
+     │                                                                                                                               │     
+     │ 1. Mixed precision training for memory efficiency                                                                             │     
+     │ 2. Advanced loss functions (Focal loss, Dice loss for height prediction)                                                      │     
+     │ 3. Model ensemble capabilities across patches                                                                                 │     
+     │ 4. Hyperparameter optimization integration                                                                                    │     
+     │                                                                                                                               │     
+     │ This analysis reveals significant opportunities for improvement in batch processing, data augmentation, validation            │     
+     │ methodology, and multi-patch training integration.                                                                            │     
+     ╰───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯     
+     +18 more tool uses
+  ⎿  No (tell Claude what to do differently)
+
+> Good plan, also training results could be saved for later usage. Could you update it plan and add to
+  @docs/implementation_plan_2025.md?
+  ⎿  Read docs/implementation_plan_2025.md (868 lines)
+
+● Read(train_predict_map.py)
+  ⎿  Read 100 lines (ctrl+r to expand)
+
+● Search(pattern: "augment|flip|rotation|DataLoader|batch|early.*stop", path: "train_predict_map.py")
+  ⎿  Found 1 file (ctrl+r to expand)
+
+● Task(Check multi-patch training capabilities)
+  ⎿  Done (16 tool uses · 32.4k tokens · 2m 58.9s)
+
+● Based on my analysis of the current train_predict_map.py and the planning request, here's the comprehensive enhanced training
+  strategy plan:
+
+●User approved Claude's plan:
+  ⎿  Enhanced Training Strategy Plan for train_predict_map.py
+
+     Current State Analysis
+
+     The current train_predict_map.py has basic multi-patch capabilities but lacks:
+     - Data Augmentation: No spatial transformations (rotations, flips)
+     - Proper Batch Training: U-Net models only train on first patch
+     - Early Stopping: Limited validation and no patience-based stopping
+     - Memory Efficiency: Loads all patches simultaneously
+     - Training Persistence: Limited checkpoint/resume capabilities
+
+     Enhancement Plan
+
+     1. Data Augmentation System (60 → 720 effective images)
+
+     - Spatial Transformations: 3 flips × 4 rotations = 12x augmentation
+     - On-the-fly Generation: Memory efficient augmentation during training
+     - Geospatial Consistency: Apply same transforms to features and GEDI targets
+     - Configurable: --augment-factor parameter (default: 12)
+
+     2. Enhanced Batch Training Pipeline
+
+     - True Multi-Patch Training: All models train on all patches
+     - Configurable Batch Size: Default 32, adjustable for GPU memory
+     - PyTorch DataLoaders: Efficient batch loading with workers
+     - Memory Streaming: Load patches on-demand, not all at once
+
+     3. Early Stopping & Model Checkpointing
+
+     - Validation Split: 80/20 train/validation across patches
+     - Early Stopping: Stop after 10-20 epochs without improvement
+     - Best Model Saving: Save model with lowest validation loss
+     - Training Resumption: Resume from checkpoints with state
+
+     4. Enhanced U-Net Training
+
+     - Multi-Patch DataLoader: Custom dataset class for patch-based training
+     - Gradient Accumulation: Handle large batch sizes with limited memory
+     - Learning Rate Scheduling: Adaptive learning rate with warmup
+     - Mixed Precision: Faster training with automatic mixed precision
+
+     5. Training Results Persistence
+
+     - Comprehensive Logging: Loss curves, metrics, training time
+     - Model Artifacts: Best models, checkpoints, configurations
+     - Visualization: Training curves, augmentation examples
+     - Evaluation Integration: Automatic evaluation on completion
+
+     Implementation Updates
+
+     New Files:
+
+     - train_predict_map.py (enhanced with augmentation classes)
+     - Training results saved to organized output structure
+
+     Key Classes:
+
+     - AugmentedPatchDataset: PyTorch dataset with 12x augmentation
+     - EarlyStoppingCallback: Patience-based training control
+     - TrainingLogger: Comprehensive training metrics tracking
+     - EnhancedUNetTrainer: Proper multi-patch U-Net training
+
+     Output Structure:
+
+     chm_outputs/{model_type}/
+     ├── models/
+     │   ├── best_model.pth
+     │   ├── final_model.pth
+     │   └── checkpoints/
+     ├── logs/
+     │   ├── training_log.json
+     │   ├── loss_curves.png
+     │   └── augmentation_examples.png
+     ├── predictions/
+     └── evaluation/
+
+     New CLI Arguments:
+
+     - --augment: Enable data augmentation (12x increase)
+     - --early-stopping-patience: Epochs to wait (default: 15)
+     - --validation-split: Train/val ratio (default: 0.8)
+     - --checkpoint-freq: Save frequency (default: 10 epochs)
+     - --resume-from: Resume training from checkpoint
+
+     Expected Benefits
+
+     - 12x More Training Data: From 60 → 720 effective patches
+     - Better Generalization: Spatial augmentation reduces overfitting
+     - Efficient Training: Early stopping prevents overtraining
+     - Production Ready: Saved models and comprehensive logging
+     - Memory Efficient: Streaming data loading for large datasets
