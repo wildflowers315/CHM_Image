@@ -25,7 +25,15 @@ import warnings
 import argparse
 from tqdm import tqdm
 import glob
+import json
+import joblib
 warnings.filterwarnings('ignore')
+
+# Import multi-patch functionality
+from data.multi_patch import (
+    PatchInfo, PatchRegistry, PredictionMerger,
+    load_multi_patch_gedi_data, generate_multi_patch_summary
+)
 
 from evaluate_predictions import calculate_metrics
 try:
@@ -1180,9 +1188,21 @@ def train_3d_unet(features: np.ndarray, gedi_target: np.ndarray,
 def parse_args():
     parser = argparse.ArgumentParser(description='Unified patch-based training for all model types')
     
-    # Primary input (required for all models)
-    parser.add_argument('--patch-path', type=str, required=True,
-                       help='Path to patch TIF file with GEDI rh band')
+    # Input modes - either single patch or multi-patch directory
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument('--patch-path', type=str,
+                           help='Path to single patch TIF file with GEDI rh band')
+    input_group.add_argument('--patch-dir', type=str,
+                           help='Directory containing multiple patch TIF files')
+    
+    # Multi-patch options
+    parser.add_argument('--patch-pattern', type=str, default='*.tif',
+                       help='File pattern for multi-patch mode (e.g., "*_temporal_*.tif")')
+    parser.add_argument('--merge-predictions', action='store_true',
+                       help='Merge individual patch predictions into continuous map')
+    parser.add_argument('--merge-strategy', type=str, default='average', 
+                       choices=['average', 'maximum', 'first'],
+                       help='Strategy for merging overlapping predictions')
     
     # Output settings
     parser.add_argument('--output-dir', type=str, default='chm_outputs',
@@ -1229,8 +1249,19 @@ def main():
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
-    print(f"Training {args.model.upper()} model using patch: {args.patch_path}")
-    
+    # Determine if we're in single-patch or multi-patch mode
+    if args.patch_path:
+        # Single patch mode (existing functionality)
+        print(f"Training {args.model.upper()} model using single patch: {args.patch_path}")
+        train_single_patch(args)
+    else:
+        # Multi-patch mode (new functionality)
+        print(f"Training {args.model.upper()} model using multiple patches from: {args.patch_dir}")
+        train_multi_patch(args)
+
+
+def train_single_patch(args):
+    """Train model on a single patch (existing functionality)."""
     # Load patch data
     print("Loading patch data...")
     features, gedi_target, band_info = load_patch_data(args.patch_path, normalize_bands=True)
@@ -1269,7 +1300,6 @@ def main():
         
         # Save model
         if args.model == 'rf':
-            import joblib
             model_path = os.path.join(args.output_dir, 'rf_model.pkl')
             joblib.dump(model, model_path)
         else:  # MLP
@@ -1321,151 +1351,94 @@ def main():
         
         importance_data = {}  # U-Net doesn't have traditional feature importance
     
-    # Save metrics and importance
-    metrics_path = os.path.join(args.output_dir, 'training_metrics.json')
-    import json
+    # Save training metrics
+    metrics_file = os.path.join(args.output_dir, 'training_metrics.json')
+    save_training_metrics(train_metrics, importance_data, metrics_file)
     
-    # Convert numpy types to Python types for JSON serialization
-    def convert_numpy_types(obj):
-        if isinstance(obj, dict):
-            return {k: convert_numpy_types(v) for k, v in obj.items()}
-        elif isinstance(obj, (np.float32, np.float64)):
-            return float(obj)
-        elif isinstance(obj, (np.int32, np.int64)):
-            return int(obj)
-        else:
-            return obj
-    
-    with open(metrics_path, 'w') as f:
-        json.dump({
-            'metrics': convert_numpy_types(train_metrics),
-            'importance': convert_numpy_types(importance_data),
-            'model_type': args.model,
-            'temporal_mode': is_temporal,
-            'patch_path': args.patch_path
-        }, f, indent=2)
-    
-    print(f"Saved training metrics to: {metrics_path}")
-    
-    # Print training results
-    print("\\nTraining Results:")
-    for metric, value in train_metrics.items():
-        if isinstance(value, (int, float)):
-            print(f"{metric}: {value:.4f}")
-        else:
-            print(f"{metric}: {value}")
-    
-    if importance_data:
-        print("\\nTop 5 Important Features:")
-        for name, imp in list(importance_data.items())[:5]:
-            print(f"{name}: {imp:.3f}")
-    
-    # Generate prediction if requested or automatically for RF/MLP
-    if args.generate_prediction or args.model in ['rf', 'mlp']:
-        print("\\nGenerating prediction map...")
+    # Generate prediction if requested
+    if args.generate_prediction:
+        print("Generating prediction...")
         
         if args.model in ['rf', 'mlp']:
-            # For traditional models, predict on all pixels
-            print("Reshaping patch for pixel-wise prediction...")
-            # Reshape features for prediction: (n_pixels, n_bands)
-            h, w = features.shape[1], features.shape[2]
-            X_pred = features.reshape(features.shape[0], -1).T  # (n_pixels, n_bands)
+            # Generate full prediction map for traditional models
+            print("Generating full prediction map for traditional model...")
             
-            # Handle NaN values for prediction (set to 0)
-            X_pred = np.nan_to_num(X_pred, nan=0.0, posinf=0.0, neginf=0.0)
+            # Prepare full feature data
+            full_features = features.reshape(features.shape[0], -1).T  # (n_pixels, n_bands)
             
-            print(f"Predicting on {X_pred.shape[0]} pixels with {X_pred.shape[1]} features...")
+            # Remove any NaN/inf values
+            valid_mask = np.all(np.isfinite(full_features), axis=1)
             
             if args.model == 'rf':
-                predictions = model.predict(X_pred)
+                predictions = np.full(valid_mask.shape[0], np.nan)
+                predictions[valid_mask] = model.predict(full_features[valid_mask])
             else:  # MLP
-                model.eval()
-                with torch.no_grad():
-                    X_pred_tensor = torch.FloatTensor(X_pred)
-                    X_pred_normalized = (X_pred_tensor - model.scaler_mean) / model.scaler_std
-                    
-                    predictions = []
-                    batch_size = min(args.batch_size, 1024)  # Limit batch size for memory
-                    
-                    for i in tqdm(range(0, len(X_pred), batch_size), desc="Predicting batches"):
-                        batch = X_pred_normalized[i:i + batch_size]
+                if TORCH_AVAILABLE:
+                    model.eval()
+                    with torch.no_grad():
+                        input_tensor = torch.FloatTensor(full_features[valid_mask])
                         if torch.cuda.is_available():
-                            batch = batch.cuda()
-                        pred = model(batch)
-                        predictions.extend(pred.cpu().numpy())
-                    predictions = np.array(predictions)
+                            input_tensor = input_tensor.cuda()
+                            model = model.cuda()
+                        pred_tensor = model(input_tensor)
+                        pred_values = pred_tensor.cpu().numpy().flatten()
+                        
+                    predictions = np.full(valid_mask.shape[0], np.nan)
+                    predictions[valid_mask] = pred_values
+                else:
+                    raise ImportError("PyTorch is required for MLP prediction")
             
-            # Reshape back to spatial dimensions
-            predictions = predictions.reshape(h, w)
-            print(f"Generated prediction map with shape: {predictions.shape}")
-            print(f"Prediction range: [{predictions.min():.2f}, {predictions.max():.2f}]")
+            # Reshape to original dimensions
+            predictions = predictions.reshape(features.shape[1], features.shape[2])
             
         else:  # U-Net models
-            model.eval()
-            with torch.no_grad():
-                # Add batch dimension
-                if args.model == '2d_unet':
-                    # features: (bands, h, w) -> (1, bands, h, w)
-                    input_tensor = torch.FloatTensor(features).unsqueeze(0)
-                else:  # 3d_unet
-                    # Reshape temporal data using same logic as train_3d_unet
-                    n_bands = features.shape[0]
-                    h, w = features.shape[1], features.shape[2]
+            # Prepare input data
+            if args.model == '2d_unet':
+                # Non-temporal mode (collapse time dimension)
+                if len(features.shape) == 4:  # (bands, time, height, width)
+                    combined_features = features.reshape(-1, features.shape[2], features.shape[3])
+                else:  # (bands, height, width)
+                    combined_features = features
                     
-                    # Expected structure: 180 temporal + 14 non-temporal = 194 total feature bands
-                    n_temporal_expected = 180  # 15 bands × 12 months
+                input_tensor = torch.FloatTensor(combined_features).unsqueeze(0)
+                
+            else:  # 3d_unet
+                # Temporal mode - first try to determine if we need fallback
+                n_bands = features.shape[0]
+                n_temporal_expected = int(12 * (n_bands // 12))  # Expected temporal bands
+                
+                if n_bands >= n_temporal_expected:
+                    # Reshape for 3D processing: (bands, height, width) -> (new_bands, time, height, width)
+                    n_features_per_month = n_bands // 12
+                    combined_features = features[:n_temporal_expected].reshape(n_features_per_month, 12, features.shape[1], features.shape[2])
                     
-                    if n_bands >= n_temporal_expected:
-                        # Separate temporal and non-temporal bands
-                        temporal_features = features[:n_temporal_expected]  # First 180 bands
-                        nontemporal_features = features[n_temporal_expected:] if n_bands > n_temporal_expected else np.empty((0, h, w))
-                        
-                        # Reshape temporal data: (180, h, w) -> (15, 12, h, w)
-                        n_channels_per_month = 15  # S1(2) + S2(11) + ALOS2(2) = 15
-                        n_months = 12
-                        
-                        temporal_features_reshaped = temporal_features.reshape(n_channels_per_month, n_months, h, w)
-                        
-                        # Handle missing values in temporal data
-                        temporal_features_reshaped = np.nan_to_num(temporal_features_reshaped, nan=0.0, posinf=0.0, neginf=0.0)
-                        
-                        # Combine temporal and non-temporal features
-                        if len(nontemporal_features) > 0:
-                            # Repeat non-temporal features across time dimension
-                            nontemporal_expanded = np.tile(nontemporal_features[:, np.newaxis, :, :], (1, n_months, 1, 1))
-                            # Combine temporal and non-temporal
-                            combined_features = np.concatenate([temporal_features_reshaped, nontemporal_expanded], axis=0)
-                        else:
-                            combined_features = temporal_features_reshaped
-                        
-                        # Check if we need to apply the same fallback logic as in training
-                        try:
-                            # Test with small input to see if 3D works
-                            test_input = torch.randn(1, combined_features.shape[0], 12, 32, 32)
-                            # Try to load the model and see if it expects 3D or 2D input
-                            with torch.no_grad():
-                                if hasattr(model, 'encoder1'):  # 2D U-Net (fallback was used)
-                                    # Use temporal averaging for prediction too
-                                    averaged_features = np.mean(combined_features, axis=1)  # Average across time
-                                    input_tensor = torch.FloatTensor(averaged_features).unsqueeze(0)
-                                    print(f"Using temporal averaging for prediction: {averaged_features.shape}")
-                                else:  # 3D U-Net
-                                    input_tensor = torch.FloatTensor(combined_features).unsqueeze(0)
-                        except:
-                            # Default to temporal averaging if we can't determine
-                            averaged_features = np.mean(combined_features, axis=1)  # Average across time
-                            input_tensor = torch.FloatTensor(averaged_features).unsqueeze(0)
-                            print(f"Using temporal averaging for prediction (fallback): {averaged_features.shape}")
-                    else:
-                        raise ValueError(f"Insufficient bands for temporal processing: got {n_bands}, expected at least {n_temporal_expected}")
-                
-                if torch.cuda.is_available():
-                    input_tensor = input_tensor.cuda()
-                    model = model.cuda()
-                
-                predictions = model(input_tensor)
-                predictions = predictions.squeeze().cpu().numpy()
-        
+                    try:
+                        # Test if model accepts 3D input
+                        test_input = torch.randn(1, combined_features.shape[0], 12, 32, 32)
+                        # Try to load the model and see if it expects 3D or 2D input
+                        with torch.no_grad():
+                            if hasattr(model, 'encoder1'):  # 2D U-Net (fallback was used)
+                                # Use temporal averaging for prediction too
+                                averaged_features = np.mean(combined_features, axis=1)  # Average across time
+                                input_tensor = torch.FloatTensor(averaged_features).unsqueeze(0)
+                                print(f"Using temporal averaging for prediction: {averaged_features.shape}")
+                            else:  # 3D U-Net
+                                input_tensor = torch.FloatTensor(combined_features).unsqueeze(0)
+                    except:
+                        # Default to temporal averaging if we can't determine
+                        averaged_features = np.mean(combined_features, axis=1)  # Average across time
+                        input_tensor = torch.FloatTensor(averaged_features).unsqueeze(0)
+                        print(f"Using temporal averaging for prediction (fallback): {averaged_features.shape}")
+                else:
+                    raise ValueError(f"Insufficient bands for temporal processing: got {n_bands}, expected at least {n_temporal_expected}")
+            
+            if torch.cuda.is_available():
+                input_tensor = input_tensor.cuda()
+                model = model.cuda()
+            
+            predictions = model(input_tensor)
+            predictions = predictions.squeeze().cpu().numpy()
+    
         # Save prediction
         if args.prediction_output is None:
             patch_name = os.path.splitext(os.path.basename(args.patch_path))[0]
@@ -1484,7 +1457,721 @@ def main():
         
         print(f"Saved prediction to: {prediction_path}")
     
-    print("\\nTraining completed successfully!")
+    print("Single-patch training completed successfully!")
+
+
+def train_multi_patch_from_files(args):
+    """Train model on multiple patches specified as file list with unified training and optional prediction merging."""
+    print(f"🚀 Starting multi-patch training with {args.model.upper()} from file list")
+    
+    # Parse file list from command line argument
+    patch_files = [f.strip() for f in args.patch_files.split(',')]
+    
+    # Validate that all files exist
+    valid_files = []
+    for file_path in patch_files:
+        if os.path.exists(file_path):
+            valid_files.append(file_path)
+        else:
+            print(f"⚠️  Warning: File not found: {file_path}")
+    
+    if not valid_files:
+        raise ValueError("No valid patch files found in the provided list")
+    
+    print(f"📊 Found {len(valid_files)} valid patch files out of {len(patch_files)} provided")
+    
+    # Create PatchInfo objects from the file list
+    patch_registry = PatchRegistry()
+    patches = []
+    
+    for file_path in tqdm(valid_files, desc="Processing patch metadata"):
+        try:
+            patch_info = PatchInfo.from_file(file_path)
+            patches.append(patch_info)
+            patch_registry.add_patch(patch_info)
+        except Exception as e:
+            print(f"⚠️  Warning: Could not process {file_path}: {e}")
+            continue
+    
+    if not patches:
+        raise ValueError("No valid patches could be processed from the file list")
+    
+    print(f"📊 Successfully processed {len(patches)} patches")
+    
+    # Continue with the same logic as train_multi_patch
+    # Validate patch consistency
+    is_consistent = patch_registry.validate_consistency()
+    if not is_consistent:
+        print("⚠️  Warning: Inconsistencies detected in patches. Proceeding with caution...")
+    
+    # Generate and save patch summary
+    summary_df = generate_multi_patch_summary(patches)
+    summary_path = os.path.join(args.output_dir, 'patch_summary.csv')
+    summary_df.to_csv(summary_path, index=False)
+    print(f"💾 Saved patch summary to: {summary_path}")
+    
+    # Get summary statistics
+    summary_stats = patch_registry.get_patch_summary()
+    print(f"📈 Dataset summary:")
+    print(f"  - Total patches: {summary_stats['total_patches']}")
+    print(f"  - Temporal patches: {summary_stats['temporal_patches']}")
+    print(f"  - Non-temporal patches: {summary_stats['non_temporal_patches']}")
+    print(f"  - Total area: {summary_stats['total_area_km2']:.1f} km²")
+    print(f"  - Reference CRS: {summary_stats['reference_crs']}")
+    print(f"  - Reference resolution: {summary_stats['reference_resolution']}m")
+    print(f"  - Reference bands: {summary_stats['reference_bands']}")
+    
+    # Detect temporal mode from first patch
+    reference_patch = patches[0]
+    is_temporal = reference_patch.temporal_mode
+    print(f"🕐 Temporal mode detected: {is_temporal}")
+    
+    # Validate model-data compatibility
+    if args.model == '2d_unet' and is_temporal:
+        raise ValueError("2D U-Net cannot be used with temporal data. Use '3d_unet' or use non-temporal patches.")
+    if args.model == '3d_unet' and not is_temporal:
+        raise ValueError("3D U-Net requires temporal data. Use '2d_unet' or use temporal patches.")
+    
+    # Load multi-patch training data
+    print("📖 Loading training data from all patches...")
+    combined_features, combined_targets = load_multi_patch_gedi_data(patches, target_band='rh')
+    
+    print(f"🎯 Combined training dataset:")
+    print(f"  - Features shape: {combined_features.shape}")
+    print(f"  - Targets shape: {combined_targets.shape}")
+    print(f"  - Target range: {combined_targets.min():.1f} - {combined_targets.max():.1f}m")
+    
+    # Train unified model (same logic as train_multi_patch)
+    print(f"🏋️ Training unified {args.model.upper()} model...")
+    
+    if args.model in ['rf', 'mlp']:
+        # Traditional models can train directly on combined features
+        feature_names = [f'band_{i+1}' for i in range(combined_features.shape[1])]
+        
+        model, train_metrics, importance_data = train_model(
+            combined_features, combined_targets,
+            model_type=args.model,
+            batch_size=args.batch_size,
+            test_size=args.test_size,
+            feature_names=feature_names
+        )
+        
+        # Save model
+        if args.model == 'rf':
+            model_path = os.path.join(args.output_dir, 'multi_patch_rf_model.pkl')
+            joblib.dump(model, model_path)
+        else:  # MLP
+            model_path = os.path.join(args.output_dir, 'multi_patch_mlp_model.pth')
+            if TORCH_AVAILABLE:
+                torch.save(model.state_dict(), model_path)
+        
+        print(f"💾 Saved {args.model.upper()} model to: {model_path}")
+        
+    else:
+        # U-Net models need special handling for multi-patch training
+        print("⚠️  U-Net multi-patch training requires patch-level processing")
+        print("    Training on first patch and applying to all patches...")
+        
+        # Load first patch for U-Net training
+        first_patch_features, first_patch_target, band_info = load_patch_data(
+            reference_patch.file_path, normalize_bands=True
+        )
+        
+        if args.model == '2d_unet':
+            model, train_metrics = train_2d_unet(
+                first_patch_features, first_patch_target,
+                epochs=args.epochs,
+                learning_rate=args.learning_rate,
+                weight_decay=args.weight_decay,
+                base_channels=args.base_channels,
+                huber_delta=args.huber_delta,
+                shift_radius=args.shift_radius
+            )
+            model_path = os.path.join(args.output_dir, 'multi_patch_2d_unet_model.pth')
+        else:  # 3d_unet
+            model, train_metrics = train_3d_unet(
+                first_patch_features, first_patch_target,
+                epochs=args.epochs,
+                learning_rate=args.learning_rate,
+                weight_decay=args.weight_decay,
+                base_channels=args.base_channels,
+                huber_delta=args.huber_delta,
+                shift_radius=args.shift_radius
+            )
+            model_path = os.path.join(args.output_dir, 'multi_patch_3d_unet_model.pth')
+        
+        if TORCH_AVAILABLE:
+            torch.save(model.state_dict(), model_path)
+        print(f"💾 Saved {args.model.upper()} model to: {model_path}")
+        
+        importance_data = {}
+    
+    # Save training metrics
+    metrics_file = os.path.join(args.output_dir, 'multi_patch_training_metrics.json')
+    save_training_metrics(train_metrics, importance_data, metrics_file)
+    
+    # Generate predictions for all patches if requested
+    if args.generate_prediction:
+        print("🔮 Generating predictions for all patches...")
+        
+        patch_predictions = {}
+        
+        for i, patch_info in enumerate(tqdm(patches, desc="Generating predictions")):
+            try:
+                prediction_array = generate_patch_prediction(
+                    model, patch_info, args.model, is_temporal
+                )
+                
+                # Save individual patch prediction
+                patch_pred_filename = f"prediction_{args.model}_{patch_info.patch_id}.tif"
+                patch_pred_path = os.path.join(args.output_dir, patch_pred_filename)
+                
+                # Save with same georeference as input patch
+                with rasterio.open(patch_info.file_path) as src:
+                    profile = src.profile.copy()
+                    profile.update(count=1, dtype='float32')
+                    
+                    with rasterio.open(patch_pred_path, 'w', **profile) as dst:
+                        dst.write(prediction_array.astype('float32'), 1)
+                
+                patch_predictions[patch_info.patch_id] = patch_pred_path
+                
+            except Exception as e:
+                print(f"⚠️  Error generating prediction for {patch_info.patch_id}: {e}")
+                continue
+        
+        print(f"✅ Generated predictions for {len(patch_predictions)}/{len(patches)} patches")
+        
+        # Merge predictions if requested
+        if args.merge_predictions and patch_predictions:
+            print(f"🔗 Merging predictions using '{args.merge_strategy}' strategy...")
+            
+            merger = PredictionMerger(patches, merge_strategy=args.merge_strategy)
+            merged_output_path = os.path.join(args.output_dir, f'merged_prediction_{args.model}.tif')
+            
+            merged_path = merger.merge_predictions_from_files(
+                patch_predictions, merged_output_path
+            )
+            
+            print(f"🗺️  Merged prediction saved to: {merged_path}")
+    
+    print("🎉 Multi-patch training from file list completed successfully!")
+
+
+def train_multi_patch(args):
+    """Train model on multiple patches with unified training and optional prediction merging."""
+    print(f"🚀 Starting multi-patch training with {args.model.upper()}")
+    
+    # Initialize patch registry and discover patches
+    patch_registry = PatchRegistry()
+    patches = patch_registry.discover_patches(args.patch_dir, args.patch_pattern)
+    
+    if not patches:
+        raise ValueError(f"No patches found in {args.patch_dir} matching pattern {args.patch_pattern}")
+    
+    print(f"📊 Discovered {len(patches)} patches")
+    
+    # Validate patch consistency
+    is_consistent = patch_registry.validate_consistency()
+    if not is_consistent:
+        print("⚠️  Warning: Inconsistencies detected in patches. Proceeding with caution...")
+    
+    # Generate and save patch summary
+    summary_df = generate_multi_patch_summary(patches)
+    summary_path = os.path.join(args.output_dir, 'patch_summary.csv')
+    summary_df.to_csv(summary_path, index=False)
+    print(f"💾 Saved patch summary to: {summary_path}")
+    
+    # Get summary statistics
+    summary_stats = patch_registry.get_patch_summary()
+    print(f"📈 Dataset summary:")
+    print(f"  - Total patches: {summary_stats['total_patches']}")
+    print(f"  - Temporal patches: {summary_stats['temporal_patches']}")
+    print(f"  - Non-temporal patches: {summary_stats['non_temporal_patches']}")
+    print(f"  - Total area: {summary_stats['total_area_km2']:.1f} km²")
+    print(f"  - Reference CRS: {summary_stats['reference_crs']}")
+    print(f"  - Reference resolution: {summary_stats['reference_resolution']}m")
+    print(f"  - Reference bands: {summary_stats['reference_bands']}")
+    
+    # Detect temporal mode from first patch
+    reference_patch = patches[0]
+    is_temporal = reference_patch.temporal_mode
+    print(f"🕐 Temporal mode detected: {is_temporal}")
+    
+    # Validate model-data compatibility
+    if args.model == '2d_unet' and is_temporal:
+        raise ValueError("2D U-Net cannot be used with temporal data. Use '3d_unet' or use non-temporal patches.")
+    if args.model == '3d_unet' and not is_temporal:
+        raise ValueError("3D U-Net requires temporal data. Use '2d_unet' or use temporal patches.")
+    
+    # Load multi-patch training data
+    print("📖 Loading training data from all patches...")
+    combined_features, combined_targets = load_multi_patch_gedi_data(patches, target_band='rh')
+    
+    print(f"🎯 Combined training dataset:")
+    print(f"  - Features shape: {combined_features.shape}")
+    print(f"  - Targets shape: {combined_targets.shape}")
+    print(f"  - Target range: {combined_targets.min():.1f} - {combined_targets.max():.1f}m")
+    
+    # Train unified model
+    print(f"🏋️ Training unified {args.model.upper()} model...")
+    
+    if args.model in ['rf', 'mlp']:
+        # Traditional models can train directly on combined features
+        feature_names = [f'band_{i+1}' for i in range(combined_features.shape[1])]
+        
+        model, train_metrics, importance_data = train_model(
+            combined_features, combined_targets,
+            model_type=args.model,
+            batch_size=args.batch_size,
+            test_size=args.test_size,
+            feature_names=feature_names
+        )
+        
+        # Save model
+        if args.model == 'rf':
+            model_path = os.path.join(args.output_dir, 'multi_patch_rf_model.pkl')
+            joblib.dump(model, model_path)
+        else:  # MLP
+            model_path = os.path.join(args.output_dir, 'multi_patch_mlp_model.pth')
+            if TORCH_AVAILABLE:
+                torch.save(model.state_dict(), model_path)
+        
+        print(f"💾 Saved {args.model.upper()} model to: {model_path}")
+        
+    else:
+        # U-Net models need special handling for multi-patch training
+        # For now, we'll train on the combined dataset by creating synthetic patches
+        print("⚠️  U-Net multi-patch training requires patch-level processing")
+        print("    Training on first patch and applying to all patches...")
+        
+        # Load first patch for U-Net training
+        first_patch_features, first_patch_target, band_info = load_patch_data(
+            reference_patch.file_path, normalize_bands=True
+        )
+        
+        if args.model == '2d_unet':
+            model, train_metrics = train_2d_unet(
+                first_patch_features, first_patch_target,
+                epochs=args.epochs,
+                learning_rate=args.learning_rate,
+                weight_decay=args.weight_decay,
+                base_channels=args.base_channels,
+                huber_delta=args.huber_delta,
+                shift_radius=args.shift_radius
+            )
+            model_path = os.path.join(args.output_dir, 'multi_patch_2d_unet_model.pth')
+        else:  # 3d_unet
+            model, train_metrics = train_3d_unet(
+                first_patch_features, first_patch_target,
+                epochs=args.epochs,
+                learning_rate=args.learning_rate,
+                weight_decay=args.weight_decay,
+                base_channels=args.base_channels,
+                huber_delta=args.huber_delta,
+                shift_radius=args.shift_radius
+            )
+            model_path = os.path.join(args.output_dir, 'multi_patch_3d_unet_model.pth')
+        
+        if TORCH_AVAILABLE:
+            torch.save(model.state_dict(), model_path)
+        print(f"💾 Saved {args.model.upper()} model to: {model_path}")
+        
+        importance_data = {}
+    
+    # Save training metrics
+    metrics_file = os.path.join(args.output_dir, 'multi_patch_training_metrics.json')
+    save_training_metrics(train_metrics, importance_data, metrics_file)
+    
+    # Generate predictions for all patches if requested
+    if args.generate_prediction:
+        print("🔮 Generating predictions for all patches...")
+        
+        patch_predictions = {}
+        
+        for i, patch_info in enumerate(tqdm(patches, desc="Generating predictions")):
+            try:
+                prediction_array = generate_patch_prediction(
+                    model, patch_info, args.model, is_temporal
+                )
+                
+                # Save individual patch prediction
+                patch_pred_filename = f"prediction_{args.model}_{patch_info.patch_id}.tif"
+                patch_pred_path = os.path.join(args.output_dir, patch_pred_filename)
+                
+                # Save with same georeference as input patch
+                with rasterio.open(patch_info.file_path) as src:
+                    profile = src.profile.copy()
+                    profile.update(count=1, dtype='float32')
+                    
+                    with rasterio.open(patch_pred_path, 'w', **profile) as dst:
+                        dst.write(prediction_array.astype('float32'), 1)
+                
+                patch_predictions[patch_info.patch_id] = patch_pred_path
+                
+            except Exception as e:
+                print(f"⚠️  Error generating prediction for {patch_info.patch_id}: {e}")
+                continue
+        
+        print(f"✅ Generated predictions for {len(patch_predictions)}/{len(patches)} patches")
+        
+        # Merge predictions if requested
+        if args.merge_predictions and patch_predictions:
+            print(f"🔗 Merging predictions using '{args.merge_strategy}' strategy...")
+            
+            merger = PredictionMerger(patches, merge_strategy=args.merge_strategy)
+            merged_output_path = os.path.join(args.output_dir, f'merged_prediction_{args.model}.tif')
+            
+            merged_path = merger.merge_predictions_from_files(
+                patch_predictions, merged_output_path
+            )
+            
+            print(f"🗺️  Merged prediction saved to: {merged_path}")
+    
+    print("🎉 Multi-patch training completed successfully!")
+
+
+def generate_patch_prediction(model, patch_info: PatchInfo, model_type: str, is_temporal: bool) -> np.ndarray:
+    """Generate prediction for a single patch using trained model."""
+    # Load patch data
+    features, _, _ = load_patch_data(patch_info.file_path, normalize_bands=True)
+    
+    if model_type in ['rf', 'mlp']:
+        # Prepare full feature data for traditional models
+        full_features = features.reshape(features.shape[0], -1).T  # (n_pixels, n_bands)
+        
+        # Remove any NaN/inf values
+        valid_mask = np.all(np.isfinite(full_features), axis=1)
+        
+        if model_type == 'rf':
+            predictions = np.full(valid_mask.shape[0], np.nan)
+            predictions[valid_mask] = model.predict(full_features[valid_mask])
+        else:  # MLP
+            if TORCH_AVAILABLE:
+                model.eval()
+                with torch.no_grad():
+                    input_tensor = torch.FloatTensor(full_features[valid_mask])
+                    if torch.cuda.is_available():
+                        input_tensor = input_tensor.cuda()
+                        model = model.cuda()
+                    pred_tensor = model(input_tensor)
+                    pred_values = pred_tensor.cpu().numpy().flatten()
+                    
+                predictions = np.full(valid_mask.shape[0], np.nan)
+                predictions[valid_mask] = pred_values
+            else:
+                raise ImportError("PyTorch is required for MLP prediction")
+        
+        # Reshape to original dimensions
+        predictions = predictions.reshape(features.shape[1], features.shape[2])
+        
+    else:  # U-Net models
+        if model_type == '2d_unet':
+            # Non-temporal mode
+            if len(features.shape) == 4:  # (bands, time, height, width)
+                combined_features = features.reshape(-1, features.shape[2], features.shape[3])
+            else:  # (bands, height, width)
+                combined_features = features
+                
+            input_tensor = torch.FloatTensor(combined_features).unsqueeze(0)
+            
+        else:  # 3d_unet
+            # Temporal mode
+            n_bands = features.shape[0]
+            n_temporal_expected = int(12 * (n_bands // 12))
+            
+            if n_bands >= n_temporal_expected:
+                n_features_per_month = n_bands // 12
+                combined_features = features[:n_temporal_expected].reshape(
+                    n_features_per_month, 12, features.shape[1], features.shape[2]
+                )
+                input_tensor = torch.FloatTensor(combined_features).unsqueeze(0)
+            else:
+                raise ValueError(f"Insufficient bands for temporal processing: got {n_bands}")
+        
+        if torch.cuda.is_available():
+            input_tensor = input_tensor.cuda()
+            model = model.cuda()
+        
+        model.eval()
+        with torch.no_grad():
+            predictions = model(input_tensor)
+            predictions = predictions.squeeze().cpu().numpy()
+    
+    return predictions
+
+
+def save_training_metrics(train_metrics: Dict, importance_data: Dict, metrics_file: str):
+    """Save training metrics and importance data to JSON file."""
+    def convert_numpy_types(obj):
+        """Convert numpy types to Python types for JSON serialization."""
+        if isinstance(obj, dict):
+            return {k: convert_numpy_types(v) for k, v in obj.items()}
+        elif isinstance(obj, (np.float32, np.float64)):
+            return float(obj)
+        elif isinstance(obj, (np.int32, np.int64)):
+            return int(obj)
+        elif hasattr(obj, 'item'):  # Handle torch/numpy scalars
+            return obj.item()
+        else:
+            return obj
+    
+    output_data = {
+        "training_metrics": convert_numpy_types(train_metrics),
+        "feature_importance": convert_numpy_types(importance_data)
+    }
+    
+    with open(metrics_file, 'w') as f:
+        json.dump(output_data, f, indent=4)
+    
+    print(f"Saved training metrics to: {metrics_file}")
+
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Unified Patch-Based Canopy Height Model Training and Prediction')
+    
+    # Input modes - single patch, multi-patch directory, or file list
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument('--patch-path', type=str,
+                           help='Path to single patch TIF file with GEDI rh band')
+    input_group.add_argument('--patch-dir', type=str,
+                           help='Directory containing multiple patch TIF files')
+    input_group.add_argument('--patch-files', type=str,
+                           help='Comma-separated list of patch TIF file paths')
+    
+    # Model selection
+    parser.add_argument('--model', type=str, required=True,
+                       choices=['rf', 'mlp', '2d_unet', '3d_unet'],
+                       help='Model type to train')
+    
+    # Output configuration
+    parser.add_argument('--output-dir', type=str, required=True,
+                       help='Output directory for models and predictions')
+    
+    # Multi-patch specific options
+    parser.add_argument('--patch-pattern', type=str, default='*.tif',
+                       help='File pattern to match patches (e.g., "*_temporal_*.tif")')
+    parser.add_argument('--merge-predictions', action='store_true',
+                       help='Merge individual patch predictions into single GeoTIFF')
+    parser.add_argument('--merge-strategy', type=str, default='average',
+                       choices=['average', 'maximum', 'first'],
+                       help='Strategy for merging overlapping predictions')
+    
+    # Training parameters
+    parser.add_argument('--epochs', type=int, default=50,
+                       help='Number of training epochs for neural networks')
+    parser.add_argument('--learning-rate', type=float, default=1e-3,
+                       help='Learning rate for neural networks')
+    parser.add_argument('--batch-size', type=int, default=32,
+                       help='Batch size for neural networks')
+    parser.add_argument('--test-size', type=float, default=0.2,
+                       help='Proportion of data to use for validation')
+    parser.add_argument('--weight-decay', type=float, default=1e-4,
+                       help='Weight decay for neural networks')
+    
+    # Model parameters
+    parser.add_argument('--n-estimators', type=int, default=100,
+                       help='Number of estimators for Random Forest')
+    parser.add_argument('--max-depth', type=int, default=10,
+                       help='Maximum depth for Random Forest')
+    parser.add_argument('--hidden-layers', type=str, default='128,64',
+                       help='Hidden layer sizes for MLP (comma-separated)')
+    parser.add_argument('--base-channels', type=int, default=32,
+                       help='Base channels for U-Net models')
+    parser.add_argument('--huber-delta', type=float, default=1.0,
+                       help='Delta parameter for Huber loss')
+    parser.add_argument('--shift-radius', type=int, default=1,
+                       help='Spatial shift radius for GEDI alignment')
+    
+    # Prediction options
+    parser.add_argument('--generate-prediction', action='store_true',
+                       help='Generate prediction maps after training')
+    parser.add_argument('--save-model', action='store_true',
+                       help='Save trained model to disk')
+    
+    # Verbose output
+    parser.add_argument('--verbose', action='store_true',
+                       help='Enable verbose output')
+    
+    args = parser.parse_args()
+    
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    if args.verbose:
+        print("🚀 Starting unified patch-based training system")
+        print(f"Model: {args.model}")
+        print(f"Output directory: {args.output_dir}")
+    
+    # Route to appropriate training mode
+    if args.patch_path:
+        # Single patch mode
+        if args.verbose:
+            print(f"📄 Single patch mode: {args.patch_path}")
+        
+        # Check if patch exists
+        if not os.path.exists(args.patch_path):
+            print(f"❌ Error: Patch file not found: {args.patch_path}")
+            exit(1)
+        
+        # Load patch data
+        try:
+            features, gedi_target, band_info = load_patch_data(args.patch_path, normalize_bands=True)
+            
+            # Determine temporal mode automatically
+            temporal_mode = detect_temporal_mode(band_info)
+            
+            if args.verbose:
+                print(f"✅ Loaded patch: {features.shape[0]} bands, {features.shape[1]}x{features.shape[2]} pixels")
+                print(f"📊 Mode detected: {'Temporal' if temporal_mode else 'Non-temporal'}")
+            
+        except Exception as e:
+            print(f"❌ Error loading patch: {e}")
+            exit(1)
+        
+        # Train model
+        try:
+            if args.model == 'rf':
+                model, metrics, importance = train_random_forest(
+                    features, gedi_target,
+                    n_estimators=args.n_estimators,
+                    max_depth=args.max_depth
+                )
+            elif args.model == 'mlp':
+                hidden_sizes = [int(x.strip()) for x in args.hidden_layers.split(',')]
+                model, metrics, importance = train_mlp(
+                    features, gedi_target,
+                    hidden_layers=hidden_sizes,
+                    epochs=args.epochs,
+                    learning_rate=args.learning_rate
+                )
+            elif args.model == '2d_unet':
+                model, metrics = train_2d_unet(
+                    features, gedi_target,
+                    epochs=args.epochs,
+                    learning_rate=args.learning_rate
+                )
+                importance = {}
+            elif args.model == '3d_unet':
+                if not temporal_mode:
+                    print("⚠️  Warning: Using 3D U-Net on non-temporal data may not be optimal")
+                model, metrics = train_3d_unet(
+                    features, gedi_target,
+                    epochs=args.epochs,
+                    learning_rate=args.learning_rate
+                )
+                importance = {}
+            
+            if args.verbose:
+                print(f"✅ Training completed: {args.model}")
+                print(f"📈 Final metrics: {metrics}")
+            
+        except Exception as e:
+            print(f"❌ Error during training: {e}")
+            exit(1)
+        
+        # Save model if requested
+        if args.save_model:
+            model_filename = f"model_{args.model}_{Path(args.patch_path).stem}.pkl"
+            model_path = os.path.join(args.output_dir, model_filename)
+            
+            if args.model in ['rf']:
+                joblib.dump(model, model_path)
+            elif args.model in ['mlp', '2d_unet', '3d_unet']:
+                torch.save(model.state_dict(), model_path)
+            
+            if args.verbose:
+                print(f"💾 Model saved to: {model_path}")
+        
+        # Save training metrics
+        metrics_filename = f"metrics_{args.model}_{Path(args.patch_path).stem}.json"
+        metrics_path = os.path.join(args.output_dir, metrics_filename)
+        save_training_metrics(metrics, importance, metrics_path)
+        
+        # Generate prediction if requested
+        if args.generate_prediction:
+            try:
+                if args.model in ['rf', 'mlp']:
+                    # Full patch prediction for traditional models
+                    full_features = features.reshape(features.shape[0], -1).T
+                    valid_mask = np.all(np.isfinite(full_features), axis=1)
+                    
+                    predictions = np.full(valid_mask.shape[0], np.nan)
+                    if args.model == 'rf':
+                        predictions[valid_mask] = model.predict(full_features[valid_mask])
+                    else:  # MLP
+                        model.eval()
+                        with torch.no_grad():
+                            input_tensor = torch.FloatTensor(full_features[valid_mask])
+                            if torch.cuda.is_available():
+                                input_tensor = input_tensor.cuda()
+                            pred_tensor = model(input_tensor)
+                            predictions[valid_mask] = pred_tensor.cpu().numpy().flatten()
+                    
+                    predictions = predictions.reshape(features.shape[1], features.shape[2])
+                
+                else:  # U-Net models
+                    model.eval()
+                    with torch.no_grad():
+                        if args.model == '2d_unet':
+                            if len(features.shape) == 4:
+                                combined_features = features.reshape(-1, features.shape[2], features.shape[3])
+                            else:
+                                combined_features = features
+                            input_tensor = torch.FloatTensor(combined_features).unsqueeze(0)
+                        else:  # 3d_unet
+                            n_bands = features.shape[0]
+                            n_features_per_month = n_bands // 12
+                            temporal_features = features[:n_features_per_month*12].reshape(
+                                n_features_per_month, 12, features.shape[1], features.shape[2]
+                            )
+                            input_tensor = torch.FloatTensor(temporal_features).unsqueeze(0)
+                        
+                        if torch.cuda.is_available():
+                            input_tensor = input_tensor.cuda()
+                        
+                        predictions = model(input_tensor).squeeze().cpu().numpy()
+                
+                # Save prediction
+                pred_filename = f"prediction_{args.model}_{Path(args.patch_path).stem}.tif"
+                pred_path = os.path.join(args.output_dir, pred_filename)
+                
+                with rasterio.open(args.patch_path) as src:
+                    profile = src.profile.copy()
+                    profile.update(count=1, dtype='float32')
+                    
+                    with rasterio.open(pred_path, 'w', **profile) as dst:
+                        dst.write(predictions.astype('float32'), 1)
+                
+                if args.verbose:
+                    print(f"🗺️  Prediction saved to: {pred_path}")
+                    print(f"📊 Prediction range: {np.nanmin(predictions):.2f} - {np.nanmax(predictions):.2f}m")
+                
+            except Exception as e:
+                print(f"❌ Error generating prediction: {e}")
+    
+    elif args.patch_dir:
+        # Multi-patch mode
+        if args.verbose:
+            print(f"📁 Multi-patch mode: {args.patch_dir}")
+            print(f"🔍 Pattern: {args.patch_pattern}")
+        
+        try:
+            train_multi_patch(args)
+        except Exception as e:
+            print(f"❌ Error in multi-patch training: {e}")
+            exit(1)
+    
+    elif args.patch_files:
+        # Multi-patch mode with file list
+        if args.verbose:
+            print(f"📋 Multi-patch mode: File list")
+            print(f"🔍 Files: {args.patch_files}")
+        
+        try:
+            train_multi_patch_from_files(args)
+        except Exception as e:
+            print(f"❌ Error in multi-patch training: {e}")
+            exit(1)
+    
+    print("🎉 Training completed successfully!")

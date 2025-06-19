@@ -252,6 +252,135 @@ echo "=== Data Preparation for Unified Training ==="
 #     --steps data_preparation
 
 # =============================================================================
+# MULTI-PATCH TRAINING SYSTEM (NEW FEATURE)
+# =============================================================================
+
+echo "=== Multi-Patch Training Examples ===\"
+
+# --- MULTI-PATCH TRAINING: RF with Temporal Data ---
+# Train on multiple temporal patches and merge predictions
+# python train_predict_map.py \
+#     --patch-dir "chm_outputs/" \
+#     --patch-pattern "*_temporal_*.tif" \
+#     --model rf \
+#     --output-dir chm_outputs/multi_patch_rf_temporal \
+#     --merge-predictions \
+#     --merge-strategy average \
+#     --generate-prediction \
+#     --verbose
+
+# --- MULTI-PATCH TRAINING: MLP with Non-temporal Data ---
+# Train on multiple non-temporal patches for baseline comparison
+# python train_predict_map.py \
+#     --patch-dir "chm_outputs/" \
+#     --patch-pattern "*_bandNum31_*.tif" \
+#     --model mlp \
+#     --output-dir chm_outputs/multi_patch_mlp_nontemporal \
+#     --epochs 100 \
+#     --learning-rate 1e-3 \
+#     --merge-predictions \
+#     --generate-prediction \
+#     --verbose
+
+# --- MULTI-PATCH TRAINING: 3D U-Net with Temporal Data ---
+# Train 3D U-Net on multiple temporal patches for large-area mapping
+# python train_predict_map.py \
+#     --patch-dir "chm_outputs/" \
+#     --patch-pattern "*_temporal_bandNum196_*.tif" \
+#     --model 3d_unet \
+#     --output-dir chm_outputs/multi_patch_3d_unet \
+#     --epochs 20 \
+#     --learning-rate 1e-4 \
+#     --base-channels 16 \
+#     --merge-predictions \
+#     --merge-strategy average \
+#     --generate-prediction \
+#     --verbose
+
+# --- MULTI-PATCH TRAINING: 2D U-Net with Non-temporal Data ---
+# Train 2D U-Net on multiple non-temporal patches
+# python train_predict_map.py \
+#     --patch-dir "chm_outputs/" \
+#     --patch-pattern "*_bandNum31_*.tif" \
+#     --model 2d_unet \
+#     --output-dir chm_outputs/multi_patch_2d_unet \
+#     --epochs 30 \
+#     --learning-rate 1e-3 \
+#     --base-channels 32 \
+#     --merge-predictions \
+#     --generate-prediction \
+#     --verbose
+
+# --- LARGE-AREA WORKFLOW: Generate Multiple Patches + Multi-Patch Training ---
+# Step 1: Generate multiple patches for large area
+# python run_main.py \
+#     --aoi_path downloads/large_area.geojson \
+#     --year 2022 \
+#     --temporal-mode \
+#     --use-patches \
+#     --patch-size 2560 \
+#     --patch-overlap 0.1 \
+#     --export-multiple-patches \
+#     --steps data_preparation
+
+# Step 2: Train unified model on all patches
+# python train_predict_map.py \
+#     --patch-dir "chm_outputs/" \
+#     --patch-pattern "*_temporal_*.tif" \
+#     --model 3d_unet \
+#     --output-dir chm_outputs/large_area_3d_unet \
+#     --merge-predictions \
+#     --merge-strategy seamless \
+#     --generate-prediction
+
+# --- ADVANCED MULTI-PATCH OPTIONS ---
+# Custom merge strategies and overlap handling
+# python train_predict_map.py \
+#     --patch-dir "path/to/patches/" \
+#     --patch-pattern "study_area_*_temporal_*.tif" \
+#     --model mlp \
+#     --output-dir results/multi_patch_advanced \
+#     --merge-predictions \
+#     --merge-strategy maximum \
+#     --epochs 150 \
+#     --test-size 0.15 \
+#     --generate-prediction \
+#     --save-model \
+#     --verbose
+
+# --- MULTI-PATCH TRAINING: Using File List ---
+# Train on specific TIF files provided as comma-separated list
+# python train_predict_map.py \
+#     --patch-files "chm_outputs/patch1_temporal.tif,chm_outputs/patch2_temporal.tif,chm_outputs/patch3_temporal.tif" \
+#     --model 3d_unet \
+#     --output-dir results/multi_patch_file_list \
+#     --merge-predictions \
+#     --merge-strategy average \
+#     --generate-prediction \
+#     --verbose
+
+# --- MULTI-PATCH TRAINING: Mixed temporal and non-temporal files ---
+# Note: This will fail due to incompatible temporal modes, but shows syntax
+# python train_predict_map.py \
+#     --patch-files "/path/to/patch1_temporal.tif,/path/to/patch2_temporal.tif" \
+#     --model mlp \
+#     --output-dir results/mixed_patches \
+#     --merge-predictions \
+#     --generate-prediction
+
+# --- MULTI-PATCH TRAINING: Absolute paths ---
+# Using absolute paths for patches in different locations
+# python train_predict_map.py \
+#     --patch-files "/data/site1/patch_temporal.tif,/data/site2/patch_temporal.tif,/data/site3/patch_temporal.tif" \
+#     --model rf \
+#     --output-dir results/multi_site_training \
+#     --n-estimators 200 \
+#     --max-depth 15 \
+#     --merge-predictions \
+#     --generate-prediction \
+#     --save-model
+
+# =============================================================================
 # USAGE NOTES
 # =============================================================================
 
@@ -263,6 +392,21 @@ echo "=== Data Preparation for Unified Training ==="
 # - RF/MLP: Works with both temporal and non-temporal data
 # - 2D U-Net: Non-temporal data only
 # - 3D U-Net: Temporal data only (with intelligent fallback)
+# 
+# Multi-Patch Training Benefits:
+# - Larger training datasets from multiple patches
+# - Better model generalization across spatial variations
+# - Seamless prediction maps with automatic merging
+# - Consistent model parameters across study areas
+# 
+# Multi-Patch Input Options:
+# --patch-dir: Directory with pattern matching (e.g., --patch-pattern "*.tif")
+# --patch-files: Comma-separated list of specific TIF file paths
+# 
+# Merge Strategies:
+# - average: Mean of overlapping predictions (recommended)
+# - maximum: Take maximum height value in overlaps
+# - first: Use first valid prediction (fastest)
 # 
 # Performance Ranking (based on test results):
 # 1. MLP (temporal): R² = 0.391, RMSE = 5.95m ⭐⭐

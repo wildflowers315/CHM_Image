@@ -4,6 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Common Development Commands
 
+### activate chm_env python environment
+source chm_env/bin/activate 
+
 ### Testing
 ```bash
 # Run all tests
