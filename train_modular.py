@@ -183,36 +183,31 @@ def construct_multi_patch_command(args, patch_files):
     """Construct command for multi-patch processing."""
     cmd_parts = ['python', 'train_predict_map.py']
     
-    # Use first patch as primary
-    cmd_parts.extend(['--patch-path', f'"{patch_files[0]}"'])
-    
-    # Add multi-patch support if needed
+    # Use directory-based approach for multi-patch
     if len(patch_files) > 1:
-        # Create temporary file list
-        os.makedirs(args.output_dir, exist_ok=True)
-        patch_list_file = f"{args.output_dir}/patch_list.txt"
-        
-        with open(patch_list_file, 'w') as f:
-            for patch_file in patch_files:
-                f.write(f"{patch_file}\n")
-        
-        print(f"📝 Created patch list file: {patch_list_file}")
-        # Note: train_predict_map.py would need to support --patch-list argument
-        # For now, we'll process multi-patch by using the directory
+        # Use the directory containing the patches
         patch_dir = str(Path(patch_files[0]).parent)
-        cmd_parts[-1] = f'"{patch_dir}"'  # Replace single file with directory
+        cmd_parts.extend(['--patch-dir', f'"{patch_dir}"'])
+        
+        # Add patch pattern if specified
+        if args.patch_pattern != '*.tif':
+            cmd_parts.extend(['--patch-pattern', args.patch_pattern])
+    else:
+        # Single patch file
+        cmd_parts.extend(['--patch-path', f'"{patch_files[0]}"'])
     
     # Add mode-specific arguments
     if args.mode == 'predict':
-        # For prediction-only mode
+        # For prediction-only mode, we need to use resume-from with existing model
         pretrained_model = find_pretrained_model(args)
         if not pretrained_model:
             raise ValueError("No pretrained model found. Specify --pretrained-model or train first.")
-        cmd_parts.extend(['--pretrained-model', f'"{pretrained_model}"'])
-        cmd_parts.append('--predict-only')
+        cmd_parts.extend(['--resume-from', f'"{pretrained_model}"'])
+        # Always generate prediction when resuming from model
+        cmd_parts.append('--generate-prediction')
     elif args.mode == 'train':
-        # For training-only mode
-        cmd_parts.append('--train-only')
+        # For training-only mode, don't add --generate-prediction
+        pass
     else:  # train_predict
         # Default mode - train and predict
         cmd_parts.append('--generate-prediction')
@@ -222,10 +217,13 @@ def construct_multi_patch_command(args, patch_files):
     cmd_parts.extend(['--output-dir', f'"{args.output_dir}/{args.model}/predictions"'])
     cmd_parts.append('--use-enhanced-training')
     
-    # Add aggregation if requested
+    # Add aggregation if requested (use original script's argument)
     if args.aggregate_predictions:
-        cmd_parts.append('--aggregate-predictions')
-        cmd_parts.extend(['--overlap-method', args.overlap_method])
+        cmd_parts.append('--merge-predictions')
+        # Map overlap method to merge strategy
+        strategy_map = {'mean': 'average', 'max': 'maximum', 'first': 'first'}
+        merge_strategy = strategy_map.get(args.overlap_method, 'average')
+        cmd_parts.extend(['--merge-strategy', merge_strategy])
     
     # Training parameters
     if args.augment:
@@ -254,9 +252,9 @@ def construct_multi_patch_command(args, patch_files):
             cmd_parts.extend(['--max-depth', str(args.max_depth)])
     elif args.model == 'mlp':
         if args.hidden_sizes != [512, 256, 128]:
-            cmd_parts.extend(['--hidden-sizes'] + [str(x) for x in args.hidden_sizes])
-        if args.dropout_rate != 0.2:
-            cmd_parts.extend(['--dropout-rate', str(args.dropout_rate)])
+            # Convert to comma-separated string as expected by original script
+            hidden_str = ','.join(str(x) for x in args.hidden_sizes)
+            cmd_parts.extend(['--hidden-layers', hidden_str])
     elif args.model in ['2d_unet', '3d_unet']:
         if args.base_channels:
             cmd_parts.extend(['--base-channels', str(args.base_channels)])
