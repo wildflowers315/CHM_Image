@@ -37,6 +37,14 @@ from data.multi_patch import (
     load_multi_patch_gedi_data, generate_multi_patch_summary
 )
 
+# Import enhanced spatial merger
+try:
+    from enhanced_spatial_merger import EnhancedSpatialMerger
+    USE_ENHANCED_MERGER = True
+except ImportError:
+    USE_ENHANCED_MERGER = False
+    print("Warning: Enhanced spatial merger not available, using default merger")
+
 from evaluate_predictions import calculate_metrics
 try:
     # Try importing 3D U-Net directly
@@ -2022,9 +2030,13 @@ def parse_args():
                        help='File pattern for multi-patch mode (e.g., "*_temporal_*.tif")')
     parser.add_argument('--merge-predictions', action='store_true',
                        help='Merge individual patch predictions into continuous map')
-    parser.add_argument('--merge-strategy', type=str, default='average', 
-                       choices=['average', 'maximum', 'first'],
+    parser.add_argument('--merge-strategy', type=str, default='first', 
+                       choices=['average', 'maximum', 'minimum', 'first', 'last'],
                        help='Strategy for merging overlapping predictions')
+    parser.add_argument('--create-spatial-mosaic', action='store_true',
+                       help='Create proper spatial mosaic (same as --merge-predictions but clearer name)')
+    parser.add_argument('--mosaic-name', type=str, default=None,
+                       help='Custom name for spatial mosaic output file')
     
     # Output settings
     parser.add_argument('--output-dir', type=str, default='chm_outputs',
@@ -2496,18 +2508,38 @@ def train_multi_patch_from_files(args):
         
         print(f"✅ Generated predictions for {len(patch_predictions)}/{len(patches)} patches")
         
-        # Merge predictions if requested
-        if args.merge_predictions and patch_predictions:
-            print(f"🔗 Merging predictions using '{args.merge_strategy}' strategy...")
+        # Create spatial mosaic if requested
+        if (args.merge_predictions or args.create_spatial_mosaic) and patch_predictions:
+            print(f"🔗 Creating spatial mosaic using '{args.merge_strategy}' strategy...")
             
-            merger = PredictionMerger(patches, merge_strategy=args.merge_strategy)
-            merged_output_path = os.path.join(args.output_dir, f'merged_prediction_{args.model}.tif')
+            if USE_ENHANCED_MERGER:
+                # Use enhanced spatial merger with improved NaN handling
+                merger = EnhancedSpatialMerger(merge_strategy=args.merge_strategy)
+                
+                # Determine output filename
+                if hasattr(args, 'mosaic_name') and args.mosaic_name:
+                    if not args.mosaic_name.endswith('.tif'):
+                        mosaic_filename = f"{args.mosaic_name}.tif"
+                    else:
+                        mosaic_filename = args.mosaic_name
+                else:
+                    mosaic_filename = f'spatial_mosaic_{args.model}.tif'
+                
+                merged_output_path = os.path.join(args.output_dir, mosaic_filename)
+                
+                merged_path = merger.merge_predictions_from_files(
+                    patch_predictions, merged_output_path
+                )
+            else:
+                # Fallback to original merger
+                merger = PredictionMerger(patches, merge_strategy=args.merge_strategy)
+                merged_output_path = os.path.join(args.output_dir, f'merged_prediction_{args.model}.tif')
+                
+                merged_path = merger.merge_predictions_from_files(
+                    patch_predictions, merged_output_path
+                )
             
-            merged_path = merger.merge_predictions_from_files(
-                patch_predictions, merged_output_path
-            )
-            
-            print(f"🗺️  Merged prediction saved to: {merged_path}")
+            print(f"🗺️  Spatial mosaic saved to: {merged_path}")
     
     print("🎉 Multi-patch training from file list completed successfully!")
 
@@ -2669,18 +2701,38 @@ def train_multi_patch(args):
         
         print(f"✅ Generated predictions for {len(patch_predictions)}/{len(patches)} patches")
         
-        # Merge predictions if requested
-        if args.merge_predictions and patch_predictions:
-            print(f"🔗 Merging predictions using '{args.merge_strategy}' strategy...")
+        # Create spatial mosaic if requested
+        if (args.merge_predictions or args.create_spatial_mosaic) and patch_predictions:
+            print(f"🔗 Creating spatial mosaic using '{args.merge_strategy}' strategy...")
             
-            merger = PredictionMerger(patches, merge_strategy=args.merge_strategy)
-            merged_output_path = os.path.join(args.output_dir, f'merged_prediction_{args.model}.tif')
+            if USE_ENHANCED_MERGER:
+                # Use enhanced spatial merger with improved NaN handling
+                merger = EnhancedSpatialMerger(merge_strategy=args.merge_strategy)
+                
+                # Determine output filename
+                if hasattr(args, 'mosaic_name') and args.mosaic_name:
+                    if not args.mosaic_name.endswith('.tif'):
+                        mosaic_filename = f"{args.mosaic_name}.tif"
+                    else:
+                        mosaic_filename = args.mosaic_name
+                else:
+                    mosaic_filename = f'spatial_mosaic_{args.model}.tif'
+                
+                merged_output_path = os.path.join(args.output_dir, mosaic_filename)
+                
+                merged_path = merger.merge_predictions_from_files(
+                    patch_predictions, merged_output_path
+                )
+            else:
+                # Fallback to original merger
+                merger = PredictionMerger(patches, merge_strategy=args.merge_strategy)
+                merged_output_path = os.path.join(args.output_dir, f'merged_prediction_{args.model}.tif')
+                
+                merged_path = merger.merge_predictions_from_files(
+                    patch_predictions, merged_output_path
+                )
             
-            merged_path = merger.merge_predictions_from_files(
-                patch_predictions, merged_output_path
-            )
-            
-            print(f"🗺️  Merged prediction saved to: {merged_path}")
+            print(f"🗺️  Spatial mosaic saved to: {merged_path}")
     
     print("🎉 Multi-patch training completed successfully!")
 

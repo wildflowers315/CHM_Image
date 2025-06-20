@@ -55,3 +55,14 @@ chm_env*
 test_*
 
 tmp/*
+safe_predictions/*
+direct_test/*
+complete_predictions/*
+integrated_test/*
+
+
+
+
+
+
+
