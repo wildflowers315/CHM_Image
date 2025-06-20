@@ -6,6 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### activate chm_env python environment
 source chm_env/bin/activate 
+- **IMPORTANT**: Always activate the Python environment using `source chm_env/bin/activate` before running any Python code
 
 ## File Organization Guidelines
 
