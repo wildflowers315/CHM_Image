@@ -5,7 +5,11 @@ import rasterio
 from typing import Tuple, Optional, List, Dict
 from pathlib import Path
 
-from data.normalization import normalize_band_data
+from data.normalization import (
+    normalize_sentinel1, normalize_sentinel2, normalize_srtm_elevation,
+    normalize_srtm_slope, normalize_srtm_aspect, normalize_alos2_dn,
+    normalize_canopy_height, normalize_ndvi
+)
 
 
 class PatchPreprocessor:

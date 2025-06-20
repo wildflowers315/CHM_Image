@@ -3,7 +3,22 @@ import pandas as pd
 import rasterio
 from rasterio.warp import transform, reproject
 import numpy as np
-from utils import get_latest_file
+# Import get_latest_file from the main utils.py file  
+import sys
+import os
+sys.path.append(os.path.dirname(__file__))
+
+try:
+    from utils import get_latest_file
+except ImportError:
+    # Fallback: define a simple version
+    def get_latest_file(dir_path: str, pattern: str, required: bool = True) -> str:
+        files = [f for f in os.listdir(dir_path) if f.startswith(pattern)]
+        if not files:
+            if required:
+                raise FileNotFoundError(f"No files matching pattern '{pattern}' found in {dir_path}")
+            return None
+        return os.path.join(dir_path, max(files, key=lambda x: os.path.getmtime(os.path.join(dir_path, x))))
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend

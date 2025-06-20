@@ -16,7 +16,22 @@ from rasterio.crs import CRS
 from rasterio.warp import transform_bounds
 
 from raster_utils import load_and_align_rasters
-from utils import get_latest_file
+# Import get_latest_file from the main utils.py file  
+import sys
+import os
+sys.path.append(os.path.dirname(__file__))
+
+try:
+    from utils import get_latest_file
+except ImportError:
+    # Fallback: define a simple version
+    def get_latest_file(dir_path: str, pattern: str, required: bool = True) -> str:
+        files = [f for f in os.listdir(dir_path) if f.startswith(pattern)]
+        if not files:
+            if required:
+                raise FileNotFoundError(f"No files matching pattern '{pattern}' found in {dir_path}")
+            return None
+        return os.path.join(dir_path, max(files, key=lambda x: os.path.getmtime(os.path.join(dir_path, x))))
 
 
 def scale_adjust_band(band_data, min_val, max_val, contrast=1.0, gamma=1.0):

@@ -180,6 +180,7 @@ This is a **unified temporal canopy height modeling system** that supports both 
 - Each new module requires corresponding test in `tests/`
 - Test both individual components and integration workflows
 - Include data validation and error handling tests
+- **Run system test validation after making whole changes to make sure everything is working and add additional tests if necessary.**
 
 ### Configuration Management
 - Use `config/resolution_config.py` for scale-dependent parameters

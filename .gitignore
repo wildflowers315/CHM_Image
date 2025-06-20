@@ -43,16 +43,16 @@ chm_outputs/**/*
 
 
 # temporary ignore
-*tests*
-tests/
-tests/test*
+# *tests*
+# tests/
+# tests/test*
 # docs/wholecode.md
 docs/pauls2024_githubrepo.md
 
 chm_env/*
 chm_env*
 
-test_*
+# test_*
 
 tmp/*
 safe_predictions/*
