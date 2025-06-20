@@ -1990,3 +1990,63 @@ This refactoring initiative will transform the current monolithic training syste
      - Efficient Training: Early stopping prevents overtraining
      - Production Ready: Saved models and comprehensive logging
      - Memory Efficient: Streaming data loading for large datasets
+
+## Phase 5: Code Refactoring and Organization ✅ COMPLETED
+
+### 5.1 Problem Analysis
+The codebase had grown organically with 40+ temporary and debug files scattered throughout the root directory, making it difficult to:
+- Identify which files are production vs. experimental
+- Navigate and maintain the codebase
+- Understand component relationships
+- Onboard new developers
+
+### 5.2 Refactoring Implementation ✅ COMPLETED
+
+#### File Organization
+- **tmp/**: Moved all debug_*.py, experimental predict_*.py, and temporary training scripts
+- **old/**: Moved legacy documentation and deprecated scripts  
+- **utils/**: Created structured utilities with spatial_utils.py for enhanced mosaicking
+- **models/trainers/**: Organized model-specific training components
+- **predict.py**: Renamed from predict_with_mosaic.py as primary prediction tool
+
+#### Modular Architecture
+- Enhanced spatial merger integrated into utils/spatial_utils.py
+- Model trainer classes organized in models/trainers/ structure
+- Clear import hierarchy with proper __init__.py files
+- Backward compatibility preserved for all existing workflows
+
+#### Benefits Achieved
+- **Code Clarity**: 40+ files organized into logical directories
+- **Maintainability**: Clear separation between production and experimental code
+- **Developer Experience**: Easy navigation and understanding of codebase structure
+- **Stability**: All existing workflows continue to function unchanged
+
+### 5.3 Updated File Structure
+```
+CHM_Image/
+├── tmp/                     # Temporary and debug files (40+ files organized)
+├── old/                     # Legacy documentation and deprecated code  
+├── utils/                   # Core utilities (spatial_utils.py)
+├── models/trainers/         # Model-specific training components
+├── data/                    # Data processing pipeline
+├── training/                # Modular training system (future expansion)
+├── run_main.py             # Main workflow orchestration
+├── train_predict_map.py    # Unified training and prediction (enhanced)
+├── predict.py              # Primary prediction tool with mosaicking
+└── docs/                   # Comprehensive documentation
+    ├── implementation_plan_2025.md    # This plan (updated)
+    └── code_refactoring_plan_2025.md  # Detailed refactoring documentation
+```
+
+### 5.4 Documentation Updates ✅ COMPLETED
+- **CLAUDE.md**: Updated with file organization guidelines and module structure
+- **code_refactoring_plan_2025.md**: Comprehensive refactoring documentation created
+- **implementation_plan_2025.md**: Updated with Phase 5 completion details
+
+### 5.5 Development Guidelines Established
+- Clear file naming conventions for temporary vs. production code
+- Module organization principles with proper import hierarchy  
+- Backward compatibility requirements for refactoring
+- Directory structure guidelines for future development
+
+This refactoring provides a solid foundation for continued development while maintaining all existing functionality and significantly improving code maintainability.

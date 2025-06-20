@@ -7,7 +7,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### activate chm_env python environment
 source chm_env/bin/activate 
 
-* when create temporaly file, use tmp folder
+## File Organization Guidelines
+
+### Development Files
+- **Temporary/Debug Files**: Always place in `tmp/` directory for debug scripts, experimental code, and temporary utilities
+- **Legacy Files**: Move deprecated documentation and old scripts to `old/` directory  
+- **Production Code**: Keep in root or appropriate module directories (utils/, models/, data/, etc.)
+
+### Module Structure
+- **utils/**: Core utilities (spatial_utils.py for mosaicking and spatial processing)
+- **models/**: Model architectures and training components
+  - `models/trainers/`: Model-specific trainer classes
+  - `models/losses/`: Loss function implementations
+- **data/**: Data processing pipeline components
+- **training/**: Modular training system components (future expansion)
+
+### Naming Conventions
+- Debug scripts: `debug_*.py` → place in `tmp/`
+- Experimental predictions: `predict_*.py` (if temporary) → place in `tmp/`
+- Test scripts: `test_*.py` → place in `tmp/` if temporary, `tests/` if permanent
 
 ### Testing
 ```bash

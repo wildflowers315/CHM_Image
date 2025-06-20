@@ -39,7 +39,7 @@ from data.multi_patch import (
 
 # Import enhanced spatial merger
 try:
-    from enhanced_spatial_merger import EnhancedSpatialMerger
+    from utils.spatial_utils import EnhancedSpatialMerger
     USE_ENHANCED_MERGER = True
 except ImportError:
     USE_ENHANCED_MERGER = False
