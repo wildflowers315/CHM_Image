@@ -470,21 +470,24 @@ class PredictionMerger:
 
 
 def load_multi_patch_gedi_data(patches: List[PatchInfo], 
-                              target_band: str = 'rh') -> Tuple[np.ndarray, np.ndarray]:
+                              target_band: str = 'rh',
+                              min_gedi_samples: int = 10) -> Tuple[np.ndarray, np.ndarray]:
     """
     Load and combine GEDI data from multiple patches for training.
     
     Args:
         patches: List of patch metadata
         target_band: Name of GEDI height band
+        min_gedi_samples: Minimum number of valid GEDI samples per patch for inclusion
         
     Returns:
         Combined features and targets from all patches
     """
-    print(f"Loading GEDI data from {len(patches)} patches")
+    print(f"Loading GEDI data from {len(patches)} patches (min GEDI samples: {min_gedi_samples})")
     
     all_features = []
     all_targets = []
+    skipped_patches = []
     
     for patch_info in tqdm(patches, desc="Loading patch data"):
         try:
@@ -515,8 +518,15 @@ def load_multi_patch_gedi_data(patches: List[PatchInfo],
                 # Find valid GEDI pixels (non-zero, non-NaN)
                 valid_mask = (gedi_target > 0) & (~np.isnan(gedi_target)) & (gedi_target < 100)  # Reasonable height range
                 
-                if np.sum(valid_mask) == 0:
+                valid_count = np.sum(valid_mask)
+                if valid_count == 0:
                     print(f"Warning: No valid GEDI pixels found in {patch_info.patch_id}")
+                    continue
+                
+                # Check minimum GEDI samples threshold
+                if valid_count < min_gedi_samples:
+                    print(f"Skipping {patch_info.patch_id}: only {valid_count} GEDI samples (minimum required: {min_gedi_samples})")
+                    skipped_patches.append(patch_info.patch_id)
                     continue
                 
                 # Extract valid pixels
@@ -559,7 +569,47 @@ def load_multi_patch_gedi_data(patches: List[PatchInfo],
     print(f"Feature dimensions: {combined_features.shape}")
     print(f"Target range: {combined_targets.min():.1f} - {combined_targets.max():.1f}m")
     
+    if skipped_patches:
+        print(f"Skipped {len(skipped_patches)} patches due to insufficient GEDI samples: {skipped_patches}")
+    
     return combined_features, combined_targets
+
+
+def count_gedi_samples_per_patch(patches: List[PatchInfo], 
+                                target_band: str = 'rh') -> Dict[str, int]:
+    """Count valid GEDI samples per patch without loading full training data."""
+    gedi_counts = {}
+    
+    for patch_info in tqdm(patches, desc="Counting GEDI samples"):
+        try:
+            with rasterio.open(patch_info.file_path) as src:
+                # Get band names
+                band_names = [src.descriptions[i] or f'band_{i+1}' for i in range(src.count)]
+                
+                # Find GEDI band
+                gedi_band_idx = None
+                for i, name in enumerate(band_names):
+                    if target_band in name.lower():
+                        gedi_band_idx = i
+                        break
+                
+                if gedi_band_idx is None:
+                    gedi_band_idx = -1
+                
+                # Read only GEDI band
+                gedi_data = src.read(gedi_band_idx + 1)  # rasterio uses 1-based indexing
+                
+                # Count valid GEDI pixels
+                valid_mask = (gedi_data > 0) & (~np.isnan(gedi_data)) & (gedi_data < 100)
+                valid_count = np.sum(valid_mask)
+                
+                gedi_counts[patch_info.patch_id] = valid_count
+                
+        except Exception as e:
+            print(f"Error counting GEDI samples in {patch_info.patch_id}: {e}")
+            gedi_counts[patch_info.patch_id] = 0
+    
+    return gedi_counts
 
 
 def generate_multi_patch_summary(patches: List[PatchInfo]) -> pd.DataFrame:

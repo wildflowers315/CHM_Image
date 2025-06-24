@@ -63,17 +63,36 @@ python run_main.py --temporal-mode --monthly-composite median --steps data_prepa
 python train_predict_map.py --patch-path "chm_outputs/patch.tif" --model [rf|mlp|2d_unet|3d_unet] --output-dir chm_outputs/results
 
 # Examples:
-# Non-temporal Random Forest
-python train_predict_map.py --patch-path "chm_outputs/dchm_09gd4_bandNum31_scale10_patch0000.tif" --model rf --output-dir chm_outputs/rf_results
+# Non-temporal Random Forest with GEDI filtering
+python train_predict_map.py --patch-path "chm_outputs/dchm_09gd4_bandNum31_scale10_patch0000.tif" --model rf --output-dir chm_outputs/rf_results --min-gedi-samples 10
 
-# Temporal 3D U-Net (Paul's 2025 methodology)
-python train_predict_map.py --patch-path "chm_outputs/dchm_09gd4_temporal_bandNum196_scale10_patch0000.tif" --model 3d_unet --output-dir chm_outputs/3d_unet_results --generate-prediction
+# Temporal 3D U-Net (Paul's 2025 methodology) with custom GEDI threshold  
+python train_predict_map.py --patch-path "chm_outputs/dchm_09gd4_temporal_bandNum196_scale10_patch0000.tif" --model 3d_unet --output-dir chm_outputs/3d_unet_results --generate-prediction --min-gedi-samples 20
+
+# Prediction-only mode (processes all patches regardless of GEDI samples)
+python train_predict_map.py --patch-dir "chm_outputs/" --model rf --mode predict --model-path "chm_outputs/rf_model.pkl" --output-dir chm_outputs/predictions
 ```
 
 ### Google Earth Engine Setup
 ```bash
 # Required before first use
 earthengine authenticate
+```
+
+### HPC Workflow
+```bash
+# Interactive session for testing
+sinteractive -c 4 --mem 8000M --time=0-2:00:00
+source chm_env/bin/activate
+
+# Submit production jobs
+sbatch run_2d_training.sh        # Complete 2D model training
+sbatch run_2d_prediction.sh      # Generate predictions
+sbatch run_rf_simple.sh          # Simple RF test
+
+# Monitor jobs
+squeue -u $USER
+python tmp/monitor_training.py
 ```
 
 ## Architecture Overview
@@ -177,11 +196,18 @@ This is a **unified temporal canopy height modeling system** that supports both 
 - Handle both temporal and non-temporal patch formats
 - Extract sparse GEDI pixels from patches for traditional model training
 
+### GEDI Data Quality Control
+- **Minimum GEDI Samples**: Use `--min-gedi-samples` to filter patches with insufficient training data (default: 10)
+- **Training vs Prediction**: GEDI filtering applies only to training mode; prediction mode processes all patches
+- **Existing Filters**: GEDI points with SRTM_slope > 20 are already excluded during data preparation
+- **Valid Pixel Criteria**: GEDI heights between 0-100m, non-NaN values, slope-filtered locations
+
 ### Testing
 - Each new module requires corresponding test in `tests/`
 - Test both individual components and integration workflows
 - Include data validation and error handling tests
 - **Run system test validation after making whole changes to make sure everything is working and add additional tests if necessary.**
+- Test scripts for GEDI filtering available in `tmp/test_gedi_filtering.py` and `tmp/test_mode_filtering.py`
 
 ### Configuration Management
 - Use `config/resolution_config.py` for scale-dependent parameters
@@ -211,6 +237,13 @@ This project requires Google Earth Engine authentication and PyTorch for U-Net m
 
 ## Model Performance Rankings
 Based on comprehensive testing:
+
+### Latest Results (June 2025 - Non-temporal 2D Models)
+1. **RF (non-temporal)**: R² = 0.074, RMSE = 10.2m, MAE = 7.8m ⭐
+2. **MLP (non-temporal)**: R² = 0.054, RMSE = 10.3m, MAE = 8.1m
+3. **2D U-Net (non-temporal)**: R² = -1.462, RMSE = 17.1m (requires tuning)
+
+### Historical Results
 1. **MLP (temporal)**: R² = 0.391, RMSE = 5.95m ⭐⭐
 2. **RF (non-temporal)**: R² = 0.175, RMSE = 6.92m ⭐
 3. **U-Net models**: Require additional training/tuning for optimal performance

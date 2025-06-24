@@ -60,6 +60,10 @@ direct_test/*
 complete_predictions/*
 integrated_test/*
 
+logs/*
+
+
+
 
 
 

@@ -34,7 +34,8 @@ warnings.filterwarnings('ignore')
 # Import multi-patch functionality
 from data.multi_patch import (
     PatchInfo, PatchRegistry, PredictionMerger,
-    load_multi_patch_gedi_data, generate_multi_patch_summary
+    load_multi_patch_gedi_data, generate_multi_patch_summary,
+    count_gedi_samples_per_patch
 )
 
 # Import enhanced spatial merger
@@ -2400,7 +2401,9 @@ def train_multi_patch_from_files(args):
     
     # Load multi-patch training data
     print("📖 Loading training data from all patches...")
-    combined_features, combined_targets = load_multi_patch_gedi_data(patches, target_band='rh')
+    # Apply GEDI filtering only in training mode
+    min_gedi_samples = args.min_gedi_samples if args.mode == 'train' else 0
+    combined_features, combined_targets = load_multi_patch_gedi_data(patches, target_band='rh', min_gedi_samples=min_gedi_samples)
     
     print(f"🎯 Combined training dataset:")
     print(f"  - Features shape: {combined_features.shape}")
@@ -2592,7 +2595,9 @@ def train_multi_patch(args):
     
     # Load multi-patch training data
     print("📖 Loading training data from all patches...")
-    combined_features, combined_targets = load_multi_patch_gedi_data(patches, target_band='rh')
+    # Apply GEDI filtering only in training mode
+    min_gedi_samples = args.min_gedi_samples if args.mode == 'train' else 0
+    combined_features, combined_targets = load_multi_patch_gedi_data(patches, target_band='rh', min_gedi_samples=min_gedi_samples)
     
     print(f"🎯 Combined training dataset:")
     print(f"  - Features shape: {combined_features.shape}")
@@ -2937,10 +2942,19 @@ if __name__ == "__main__":
                        help='Use enhanced training pipeline with full multi-patch support')
     
     # Prediction options
+    parser.add_argument('--mode', type=str, default='train',
+                       choices=['train', 'predict'],
+                       help='Operation mode: train models or generate predictions only')
+    parser.add_argument('--model-path', type=str,
+                       help='Path to pre-trained model for prediction mode')
     parser.add_argument('--generate-prediction', action='store_true',
                        help='Generate prediction maps after training')
     parser.add_argument('--save-model', action='store_true',
                        help='Save trained model to disk')
+    
+    # GEDI filtering options
+    parser.add_argument('--min-gedi-samples', type=int, default=10,
+                       help='Minimum number of valid GEDI samples per patch for training (default: 10)')
     
     # Verbose output
     parser.add_argument('--verbose', action='store_true',
