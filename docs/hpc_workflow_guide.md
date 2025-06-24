@@ -63,8 +63,8 @@ exit
 #!/bin/bash
 
 #SBATCH --job-name=2d_model_training
-#SBATCH --output=logs/2d_training_%j.txt
-#SBATCH --error=logs/2d_training_error_%j.txt
+#SBATCH --output=logs/%j_2d_training.txt
+#SBATCH --error=logs/%j_2d_training_error.txt
 #SBATCH --time=0-4:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -89,8 +89,8 @@ python train_predict_map.py --patch-dir "chm_outputs/" --model 2d_unet --output-
 #!/bin/bash
 
 #SBATCH --job-name=2d_prediction
-#SBATCH --output=logs/2d_prediction_%j.txt
-#SBATCH --error=logs/2d_prediction_error_%j.txt
+#SBATCH --output=logs/%j_2d_prediction.txt
+#SBATCH --error=logs/%j_2d_prediction_error.txt
 #SBATCH --time=0-2:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -118,8 +118,8 @@ python train_predict_map.py \
 #!/bin/bash
 
 #SBATCH --job-name=rf_simple
-#SBATCH --output=logs/rf_simple_%j.txt
-#SBATCH --error=logs/rf_simple_error_%j.txt
+#SBATCH --output=logs/%j rf_simple.txt
+#SBATCH --error=logs/%j_rf_simple_error.txt
 #SBATCH --time=0-1:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4

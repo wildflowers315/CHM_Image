@@ -98,6 +98,8 @@ class PatchRegistry:
     def __init__(self):
         self.patches: List[PatchInfo] = []
         self.spatial_index: Dict[str, PatchInfo] = {}
+        self.train_patches: List[PatchInfo] = []
+        self.val_patches: List[PatchInfo] = []
         
     def add_patch(self, patch_info: PatchInfo):
         """Add patch to registry with spatial indexing."""

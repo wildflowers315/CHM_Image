@@ -1,16 +1,12 @@
-"""
-Utility functions for CHM processing.
-"""
-
-from .spatial_utils import EnhancedSpatialMerger
-
-# Import functions from utils.py for backward compatibility
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+"""Utility modules for CHM processing."""
 
 try:
-    from utils import get_latest_file, geotiff_to_geojson
-    __all__ = ['EnhancedSpatialMerger', 'get_latest_file', 'geotiff_to_geojson']
+    from .mosaic_utils import create_comprehensive_mosaic, find_all_patches
+    MOSAIC_UTILS_AVAILABLE = True
 except ImportError:
-    __all__ = ['EnhancedSpatialMerger']
+    MOSAIC_UTILS_AVAILABLE = False
+
+__all__ = []
+
+if MOSAIC_UTILS_AVAILABLE:
+    __all__.extend(['create_comprehensive_mosaic', 'find_all_patches'])

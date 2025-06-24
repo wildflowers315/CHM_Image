@@ -38,6 +38,22 @@ from data.multi_patch import (
     count_gedi_samples_per_patch
 )
 
+# Import shift-aware training functionality
+try:
+    from models.trainers.shift_aware_trainer import ShiftAwareTrainer, auto_find_patches
+    SHIFT_AWARE_AVAILABLE = True
+except ImportError:
+    SHIFT_AWARE_AVAILABLE = False
+    print("Warning: Shift-aware trainer not available")
+
+# Import mosaic utilities
+try:
+    from utils.mosaic_utils import create_comprehensive_mosaic, find_all_patches
+    MOSAIC_UTILS_AVAILABLE = True
+except ImportError:
+    MOSAIC_UTILS_AVAILABLE = False
+    print("Warning: Mosaic utilities not available")
+
 # Import enhanced spatial merger
 try:
     from utils.spatial_utils import EnhancedSpatialMerger
@@ -165,15 +181,13 @@ def modified_huber_loss(pred: torch.Tensor, target: torch.Tensor,
         return 0.5 * quadratic.pow(2) + delta * linear
     
     def generate_shifts(radius):
-        """Generate all possible shifts within given radius"""
-        shifts = [(0, 0)]  # Always include no shift
+        """Generate all possible shifts within given radius using Manhattan distance"""
+        shifts = []
         for dx in range(-radius, radius + 1):
             for dy in range(-radius, radius + 1):
-                if dx == 0 and dy == 0:
-                    continue
-                # Only include shifts within radius (using Euclidean distance)
-                if (dx*dx + dy*dy) <= radius*radius:
-                    shifts.append((dx, dy))
+                # Include all shifts within Manhattan distance (max absolute coordinate <= radius)
+                # This gives us (2*radius + 1)^2 total shifts
+                shifts.append((dx, dy))
         return shifts
     
     # Generate shifts based on radius
@@ -2075,6 +2089,10 @@ def parse_args():
     parser.add_argument('--prediction-output', type=str, default=None,
                        help='Output path for prediction TIF (auto-generated if not specified)')
     
+    # Training configuration - simple train/validation split
+    parser.add_argument('--validation-split', type=float, default=0.2,
+                       help='Fraction of patches to use for validation (default: 0.2)')
+    
     return parser.parse_args()
 
 def main():
@@ -2436,8 +2454,51 @@ def train_multi_patch_from_files(args):
         
         print(f"💾 Saved {args.model.upper()} model to: {model_path}")
         
+    elif args.model == 'shift_aware_unet':
+        # Shift-aware U-Net with comprehensive multi-patch training
+        if not SHIFT_AWARE_AVAILABLE:
+            raise ImportError("Shift-aware trainer not available. Please ensure models/trainers/shift_aware_trainer.py is accessible.")
+        
+        print("🔄 Using advanced shift-aware U-Net training...")
+        
+        # Use automatic patch detection and splitting
+        train_patches, val_patches = auto_find_patches()
+        
+        # Initialize trainer with optimal settings from experiments
+        trainer = ShiftAwareTrainer(
+            shift_radius=args.shift_radius,
+            learning_rate=args.learning_rate,
+            batch_size=args.batch_size
+        )
+        
+        # Train model
+        training_history = trainer.train(
+            train_patches=train_patches,
+            val_patches=val_patches,
+            epochs=args.epochs,
+            output_dir=args.output_dir
+        )
+        
+        model_path = training_history['model_path']
+        print(f"💾 Shift-aware U-Net saved to: {model_path}")
+        
+        # Create comprehensive mosaic if requested
+        if args.generate_prediction and MOSAIC_UTILS_AVAILABLE:
+            print("🗺️  Creating comprehensive prediction mosaic...")
+            mosaic_name = f"comprehensive_mosaic_{args.model}.tif"
+            mosaic_metadata = create_comprehensive_mosaic(model_path, mosaic_name)
+            print(f"📁 Comprehensive mosaic: {mosaic_name}")
+        
+        train_metrics = {
+            'model_type': 'shift_aware_unet',
+            'shift_radius': training_history['shift_radius'],
+            'best_val_loss': training_history['best_val_loss'],
+            'training_improvement_pct': training_history['training_improvement_pct']
+        }
+        importance_data = {}
+        
     else:
-        # U-Net models need special handling for multi-patch training
+        # Traditional U-Net models need special handling for multi-patch training
         print("⚠️  U-Net multi-patch training requires patch-level processing")
         print("    Training on first patch and applying to all patches...")
         
@@ -2631,12 +2692,16 @@ def train_multi_patch(args):
         print(f"💾 Saved {args.model.upper()} model to: {model_path}")
         
     else:
-        # U-Net models need special handling for multi-patch training
-        # For now, we'll train on the combined dataset by creating synthetic patches
-        print("⚠️  U-Net multi-patch training requires patch-level processing")
-        print("    Training on first patch and applying to all patches...")
+        # U-Net multi-patch training with improved approach
+        print("🚀 Using improved U-Net multi-patch training")
         
-        # Load first patch for U-Net training
+        # For U-Net models, use the combined features from filtered patches
+        print(f"📊 Training on {len(patches)} filtered patches")
+        print(f"📊 Total GEDI samples: {len(combined_targets)}")
+        print(f"📊 Using validation split: {args.validation_split}")
+        
+        # Use first patch as reference for metadata
+        reference_patch = patches[0]
         first_patch_features, first_patch_target, band_info = load_patch_data(
             reference_patch.file_path, normalize_bands=True
         )
@@ -2883,8 +2948,8 @@ if __name__ == "__main__":
     
     # Model selection
     parser.add_argument('--model', type=str, required=True,
-                       choices=['rf', 'mlp', '2d_unet', '3d_unet'],
-                       help='Model type to train')
+                       choices=['rf', 'mlp', '2d_unet', '3d_unet', 'shift_aware_unet'],
+                       help='Model type to train (shift_aware_unet includes geolocation compensation)')
     
     # Output configuration
     parser.add_argument('--output-dir', type=str, required=True,

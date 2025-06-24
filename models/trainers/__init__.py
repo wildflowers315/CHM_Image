@@ -1,12 +1,13 @@
 """Model-specific trainers and architectures."""
-from .rf_trainer import RandomForestTrainer
-from .mlp_trainer import MLPTrainer
-from .unet_2d_trainer import UNet2DTrainer
-from .unet_3d_trainer import UNet3DTrainer
 
-__all__ = [
-    'RandomForestTrainer',
-    'MLPTrainer', 
-    'UNet2DTrainer',
-    'UNet3DTrainer'
-]
+# Import only working modules
+try:
+    from .shift_aware_trainer import ShiftAwareTrainer, ShiftAwareUNet
+    SHIFT_AWARE_AVAILABLE = True
+except ImportError:
+    SHIFT_AWARE_AVAILABLE = False
+
+__all__ = []
+
+if SHIFT_AWARE_AVAILABLE:
+    __all__.extend(['ShiftAwareTrainer', 'ShiftAwareUNet'])
