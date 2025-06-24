@@ -212,7 +212,7 @@ def parse_args():
     # GEDI parameters
     parser.add_argument('--gedi-start-date', type=str, default='2020-01-01', help='GEDI start date (YYYY-MM-DD)')
     parser.add_argument('--gedi-end-date', type=str, default='2020-12-31', help='GEDI end date (YYYY-MM-DD)')
-    parser.add_argument('--quantile', type=str, default='098', help='GEDI height quantile')
+    parser.add_argument('--quantile', type=str, default='rh98', help='GEDI height quantile')
     parser.add_argument('--gedi-type', type=str, default='singleGEDI', help='GEDI data type')
     # Add buffer for AOI with default value 1000m
     parser.add_argument('--buffer', type=int, default=1000, help='Buffer size in meters')
@@ -393,7 +393,7 @@ def export_tif_via_ee(image: ee.Image, aoi: ee.Geometry, prefix: str, scale: int
     
 def create_pixel_aligned_patches(aoi: ee.Geometry, patch_pixels: int, scale: int, overlap: float = 0.0) -> list:
     """
-    Create patches with exact pixel dimensions aligned to pixel grid, allowing extension beyond AOI.
+    Create patches with exact pixel dimensions aligned to pixel grid, working in WGS84.
     
     Args:
         aoi: Area of interest geometry
@@ -409,13 +409,8 @@ def create_pixel_aligned_patches(aoi: ee.Geometry, patch_pixels: int, scale: int
     
     print(f"[DEBUG] Creating pixel-aligned patches: {patch_pixels}×{patch_pixels} pixels ({patch_size_meters}×{patch_size_meters}m) at {scale}m resolution")
     
-    # Get AOI center and determine projection
-    center = aoi.centroid().coordinates().getInfo()
-    lon, lat = center
-    proj = get_local_projection(lon, lat)
-    
     try:
-        # First get WGS84 bounds for debugging
+        # Work directly with WGS84 bounds to avoid projection issues
         wgs84_bounds = aoi.bounds().getInfo()
         wgs84_coords = wgs84_bounds['coordinates'][0]
         wgs84_lons = [coord[0] for coord in wgs84_coords]
@@ -425,53 +420,29 @@ def create_pixel_aligned_patches(aoi: ee.Geometry, patch_pixels: int, scale: int
         
         print(f"[DEBUG] AOI bounds in WGS84: lon {wgs84_min_lon:.6f} to {wgs84_max_lon:.6f}, lat {wgs84_min_lat:.6f} to {wgs84_max_lat:.6f}")
         
-        # Project AOI to local coordinate system
-        aoi_proj = aoi.transform(proj, 1)
-        bounds = aoi_proj.bounds(1).getInfo()
-        utm_coords = bounds['coordinates'][0]
-        utm_xs = [coord[0] for coord in utm_coords]
-        utm_ys = [coord[1] for coord in utm_coords]
-        min_x, max_x = min(utm_xs), max(utm_xs)
-        min_y, max_y = min(utm_ys), max(utm_ys)
+        # Convert WGS84 degrees to approximate meters for patch grid calculation
+        # For Japan region: 1 degree lon ≈ 91200m, 1 degree lat ≈ 111320m
+        lat_center = (wgs84_min_lat + wgs84_max_lat) / 2
+        lon_scale = 111320 * math.cos(math.radians(lat_center))  
+        lat_scale = 111320
         
-        print(f"[DEBUG] AOI bounds in {proj}: min_x={min_x:.2f}, max_x={max_x:.2f}, min_y={min_y:.2f}, max_y={max_y:.2f}")
-        print(f"[DEBUG] AOI dimensions: {max_x-min_x:.2f}m × {max_y-min_y:.2f}m")
+        # Convert to approximate meters for grid calculation
+        min_x_m = wgs84_min_lon * lon_scale
+        max_x_m = wgs84_max_lon * lon_scale  
+        min_y_m = wgs84_min_lat * lat_scale
+        max_y_m = wgs84_max_lat * lat_scale
         
-        # Check if projection worked correctly (UTM should have large coordinate values)
-        if (max_x - min_x) < 1000 or abs(min_x) < 100000:
-            print(f"[WARNING] UTM projection may have failed. Using approximate conversion from WGS84.")
-            # For Japan region, use rough conversion: 1 degree ≈ 111320m at equator
-            # More accurate for this latitude: 1 degree lon ≈ 91200m, 1 degree lat ≈ 111320m
-            lat_center = (wgs84_min_lat + wgs84_max_lat) / 2
-            lon_scale = 111320 * math.cos(math.radians(lat_center))  # ~91200m for Japan
-            lat_scale = 111320  # meters per degree latitude
-            
-            # Convert to approximate UTM-like coordinates for grid calculation
-            min_x = wgs84_min_lon * lon_scale
-            max_x = wgs84_max_lon * lon_scale  
-            min_y = wgs84_min_lat * lat_scale
-            max_y = wgs84_max_lat * lat_scale
-            
-            print(f"[DEBUG] Using approximated coordinates: min_x={min_x:.2f}, max_x={max_x:.2f}, min_y={min_y:.2f}, max_y={max_y:.2f}")
-            print(f"[DEBUG] Approximated dimensions: {max_x-min_x:.2f}m × {max_y-min_y:.2f}m")
-        
-        # Align grid to pixel boundaries
-        # Expand grid to ensure complete coverage
-        grid_min_x = math.floor(min_x / scale) * scale
-        grid_min_y = math.floor(min_y / scale) * scale
-        grid_max_x = math.ceil(max_x / scale) * scale
-        grid_max_y = math.ceil(max_y / scale) * scale
-        
-        print(f"[DEBUG] Pixel-aligned grid: min_x={grid_min_x:.2f}, max_x={grid_max_x:.2f}, min_y={grid_min_y:.2f}, max_y={grid_max_y:.2f}")
+        print(f"[DEBUG] Approximated bounds in meters: x={min_x_m:.2f} to {max_x_m:.2f}, y={min_y_m:.2f} to {max_y_m:.2f}")
+        print(f"[DEBUG] Area dimensions: {max_x_m-min_x_m:.2f}m × {max_y_m-min_y_m:.2f}m")
         
         # Calculate stride (spacing between patch origins)
         stride = patch_size_meters * (1 - overlap)
         
-        # Calculate number of patches needed to cover the grid
-        grid_width = grid_max_x - grid_min_x
-        grid_height = grid_max_y - grid_min_y
-        n_patches_x = max(1, math.ceil(grid_width / stride))
-        n_patches_y = max(1, math.ceil(grid_height / stride))
+        # Calculate number of patches needed to cover the area
+        area_width = max_x_m - min_x_m
+        area_height = max_y_m - min_y_m
+        n_patches_x = max(1, math.ceil(area_width / stride))
+        n_patches_y = max(1, math.ceil(area_height / stride))
         
         print(f"[DEBUG] Grid coverage: {n_patches_x}×{n_patches_y} patches with {stride:.2f}m stride")
         
@@ -480,18 +451,29 @@ def create_pixel_aligned_patches(aoi: ee.Geometry, patch_pixels: int, scale: int
         
         for i in range(n_patches_x):
             for j in range(n_patches_y):
-                # Calculate patch origin (pixel-aligned)
-                x = grid_min_x + i * stride
-                y = grid_min_y + j * stride
+                # Calculate patch center in meters
+                patch_center_x_m = min_x_m + (i + 0.5) * stride
+                patch_center_y_m = min_y_m + (j + 0.5) * stride
                 
-                # Create patch with exact dimensions (may extend beyond AOI)
-                patch_geom_proj = ee.Geometry.Rectangle([
-                    [x, y],
-                    [x + patch_size_meters, y + patch_size_meters]
-                ], proj, False)
+                # Convert back to WGS84 degrees for patch center
+                patch_center_lon = patch_center_x_m / lon_scale
+                patch_center_lat = patch_center_y_m / lat_scale
                 
-                # Transform back to WGS84
-                patch_geom = patch_geom_proj.transform('EPSG:4326', 1)
+                # Calculate patch half-size in degrees
+                half_size_lon = (patch_size_meters / 2) / lon_scale
+                half_size_lat = (patch_size_meters / 2) / lat_scale
+                
+                # Create patch rectangle in WGS84
+                patch_min_lon = patch_center_lon - half_size_lon
+                patch_max_lon = patch_center_lon + half_size_lon
+                patch_min_lat = patch_center_lat - half_size_lat
+                patch_max_lat = patch_center_lat + half_size_lat
+                
+                # Create patch geometry
+                patch_geom = ee.Geometry.Rectangle([
+                    [patch_min_lon, patch_min_lat],
+                    [patch_max_lon, patch_max_lat]
+                ], 'EPSG:4326', False)
                 
                 # Check if patch intersects with original AOI
                 try:
@@ -499,20 +481,21 @@ def create_pixel_aligned_patches(aoi: ee.Geometry, patch_pixels: int, scale: int
                     if intersects:
                         patches.append({
                             'geometry': patch_geom,
-                            'geometry_proj': patch_geom_proj, 
-                            'x': x,
-                            'y': y,
+                            'geometry_proj': patch_geom,  # Same as geometry since we're working in WGS84
+                            'x': patch_center_x_m,
+                            'y': patch_center_y_m,
                             'width': patch_size_meters,
                             'height': patch_size_meters,
                             'pixels_x': patch_pixels,
                             'pixels_y': patch_pixels,
-                            'projection': proj,
+                            'projection': 'EPSG:4326',
                             'extends_beyond_aoi': True,
                             'patch_id': patch_count
                         })
                         patch_count += 1
+                        print(f"[DEBUG] Created patch {patch_count}: center ({patch_center_lon:.4f}, {patch_center_lat:.4f})")
                 except Exception as e:
-                    print(f"[WARNING] Failed to check intersection for patch at ({x:.2f}, {y:.2f}): {e}")
+                    print(f"[WARNING] Failed to check intersection for patch at ({patch_center_lon:.4f}, {patch_center_lat:.4f}): {e}")
                     continue
         
         print(f"[SUCCESS] Created {len(patches)} pixel-aligned patches ({patch_pixels}×{patch_pixels} pixels each)")
@@ -783,6 +766,7 @@ def main():
         patch_pixels = args.patch_size // args.scale if args.patch_size else 256
         print(f"Creating pixel-aligned patches: {patch_pixels}×{patch_pixels} pixels ({patch_pixels*args.scale}×{patch_pixels*args.scale}m) with {args.patch_overlap*100}% overlap...")
         patches = create_pixel_aligned_patches(aoi_buffered, patch_pixels, args.scale, args.patch_overlap)
+        break_num = 0
         for i, patch in enumerate(patches):
             patch_geom = patch['geometry']
             patch_id = f"patch{i:04d}"
@@ -882,20 +866,25 @@ def main():
                 fileNamePrefix = f"{geojson_name}{temporal_suffix}_bandNum{{}}_scale{args.scale}_{patch_id}".format(band_count.getInfo() if hasattr(band_count, 'getInfo') else band_count)
                 
                 if args.export_patches:
+                    # Note: scale is implicitly determined by region size / dimensions
+                    # 2560m region ÷ 256 pixels = 10m/pixel resolution
                     export_task = ee.batch.Export.image.toDrive(
                         image=patch_data,
                         description=f"{patch_id}_data",
                         fileNamePrefix=fileNamePrefix,
                         folder='GEE_exports',
-                        scale=args.scale,
                         region=patch_geom,
                         fileFormat='GeoTIFF',
                         maxPixels=1e13,
-                        crs='EPSG:4326'
+                        crs='EPSG:4326',
+                        dimensions=f"{patch['pixels_x']}x{patch['pixels_y']}"
                     )
                     export_task.start()
                     print(f"Started export for {patch_id} with fileNamePrefix: {fileNamePrefix}")
                     print(f"  Patch dimensions: {patch['pixels_x']}×{patch['pixels_y']} pixels at {args.scale}m resolution")
+                    # break_num += 1
+                    # if break_num > 1:
+                        # break # during test, apply break
             else:
                 print(f"[WARNING] No data available for {patch_id}, skipping export")
     else:
