@@ -1,18 +1,18 @@
 import ee
-import geemap
+# import geemap  # Only import when needed to avoid dependency issues
 import numpy as np
 import json
 import os
 from pathlib import Path
-import pandas as pd
+# import pandas as pd  # Only import when needed
 import datetime
 import argparse
 from typing import Union, List, Dict, Any
 import time
-from tqdm import tqdm
-import rasterio
-from rasterio.transform import from_origin
-from rasterio.crs import CRS
+# from tqdm import tqdm  # Only import when needed
+# import rasterio  # Only import when needed
+# from rasterio.transform import from_origin
+# from rasterio.crs import CRS
 import math
 
 # Import custom functions
@@ -24,13 +24,13 @@ from alos2_source import get_alos2_data
 from canopyht_source import get_canopyht_data
 from dem_source import get_dem_data
 
-# Import patch-related functions
-from data.image_patches import (
-    create_3d_patches, prepare_training_patches,
-    create_patch_grid, Patch
-)
-from data.large_area import collect_area_patches, merge_patch_predictions
-from config.resolution_config import get_patch_size, RESOLUTION_CONFIG
+# Import patch-related functions (commented out for minimal testing)
+# from data.image_patches import (
+#     create_3d_patches, prepare_training_patches,
+#     create_patch_grid, Patch
+# )
+# from data.large_area import collect_area_patches, merge_patch_predictions
+# from config.resolution_config import get_patch_size, RESOLUTION_CONFIG
 
 def get_local_projection(lon, lat):
     """Return a suitable projection string for the AOI center."""
@@ -391,29 +391,145 @@ def export_tif_via_ee(image: ee.Image, aoi: ee.Geometry, prefix: str, scale: int
     print(f"Export started with task ID: {task_id}")
     print("The file will be available in your Google Drive once the export completes.")
     
-def create_patch_geometries(aoi: ee.Geometry, patch_size: int, overlap: float = 0.1) -> list:
-    """Split AOI into patch geometries in meters using local projection, then transform to WGS84. If AOI is smaller than patch_size, buffer it to reach minimum patch_size. If projection fails, calculate patch grid in degrees using an approximate conversion."""
-    # Print AOI bounds in degrees (WGS84)
-    try:
-        wgs84_bounds = aoi.bounds().getInfo()
-        wgs84_min_x, wgs84_min_y = wgs84_bounds['coordinates'][0][0]
-        wgs84_max_x, wgs84_max_y = wgs84_bounds['coordinates'][0][2]
-        print(f"[DEBUG] AOI bounds in WGS84: min_x={wgs84_min_x}, max_x={wgs84_max_x}, min_y={wgs84_min_y}, max_y={wgs84_max_y}")
-    except Exception as e:
-        print(f"[DEBUG] Could not get AOI bounds in WGS84: {e}")
+def create_pixel_aligned_patches(aoi: ee.Geometry, patch_pixels: int, scale: int, overlap: float = 0.0) -> list:
+    """
+    Create patches with exact pixel dimensions aligned to pixel grid, allowing extension beyond AOI.
+    
+    Args:
+        aoi: Area of interest geometry
+        patch_pixels: Patch size in pixels (e.g., 256)
+        scale: Resolution in meters (e.g., 10)
+        overlap: Overlap between patches (0.0 to 1.0)
+    
+    Returns:
+        List of patch dictionaries with exact pixel dimensions
+    """
+    # Convert patch size to meters
+    patch_size_meters = patch_pixels * scale
+    
+    print(f"[DEBUG] Creating pixel-aligned patches: {patch_pixels}×{patch_pixels} pixels ({patch_size_meters}×{patch_size_meters}m) at {scale}m resolution")
+    
+    # Get AOI center and determine projection
     center = aoi.centroid().coordinates().getInfo()
     lon, lat = center
-    # Choose projection
-    if -80 <= lat <= 84:
-        utm_zone = int((lon + 180) / 6) + 1
-        hemisphere = 'N' if lat >= 0 else 'S'
-        if hemisphere == 'N':
-            proj = f'EPSG:326{utm_zone:02d}'
-        else:
-            proj = f'EPSG:327{utm_zone:02d}'
-    else:
-        proj = 'EPSG:3857'
-    # Project AOI
+    proj = get_local_projection(lon, lat)
+    
+    try:
+        # First get WGS84 bounds for debugging
+        wgs84_bounds = aoi.bounds().getInfo()
+        wgs84_coords = wgs84_bounds['coordinates'][0]
+        wgs84_lons = [coord[0] for coord in wgs84_coords]
+        wgs84_lats = [coord[1] for coord in wgs84_coords]
+        wgs84_min_lon, wgs84_max_lon = min(wgs84_lons), max(wgs84_lons)
+        wgs84_min_lat, wgs84_max_lat = min(wgs84_lats), max(wgs84_lats)
+        
+        print(f"[DEBUG] AOI bounds in WGS84: lon {wgs84_min_lon:.6f} to {wgs84_max_lon:.6f}, lat {wgs84_min_lat:.6f} to {wgs84_max_lat:.6f}")
+        
+        # Project AOI to local coordinate system
+        aoi_proj = aoi.transform(proj, 1)
+        bounds = aoi_proj.bounds(1).getInfo()
+        utm_coords = bounds['coordinates'][0]
+        utm_xs = [coord[0] for coord in utm_coords]
+        utm_ys = [coord[1] for coord in utm_coords]
+        min_x, max_x = min(utm_xs), max(utm_xs)
+        min_y, max_y = min(utm_ys), max(utm_ys)
+        
+        print(f"[DEBUG] AOI bounds in {proj}: min_x={min_x:.2f}, max_x={max_x:.2f}, min_y={min_y:.2f}, max_y={max_y:.2f}")
+        print(f"[DEBUG] AOI dimensions: {max_x-min_x:.2f}m × {max_y-min_y:.2f}m")
+        
+        # Check if projection worked correctly (UTM should have large coordinate values)
+        if (max_x - min_x) < 1000 or abs(min_x) < 100000:
+            print(f"[WARNING] UTM projection may have failed. Using approximate conversion from WGS84.")
+            # For Japan region, use rough conversion: 1 degree ≈ 111320m at equator
+            # More accurate for this latitude: 1 degree lon ≈ 91200m, 1 degree lat ≈ 111320m
+            lat_center = (wgs84_min_lat + wgs84_max_lat) / 2
+            lon_scale = 111320 * math.cos(math.radians(lat_center))  # ~91200m for Japan
+            lat_scale = 111320  # meters per degree latitude
+            
+            # Convert to approximate UTM-like coordinates for grid calculation
+            min_x = wgs84_min_lon * lon_scale
+            max_x = wgs84_max_lon * lon_scale  
+            min_y = wgs84_min_lat * lat_scale
+            max_y = wgs84_max_lat * lat_scale
+            
+            print(f"[DEBUG] Using approximated coordinates: min_x={min_x:.2f}, max_x={max_x:.2f}, min_y={min_y:.2f}, max_y={max_y:.2f}")
+            print(f"[DEBUG] Approximated dimensions: {max_x-min_x:.2f}m × {max_y-min_y:.2f}m")
+        
+        # Align grid to pixel boundaries
+        # Expand grid to ensure complete coverage
+        grid_min_x = math.floor(min_x / scale) * scale
+        grid_min_y = math.floor(min_y / scale) * scale
+        grid_max_x = math.ceil(max_x / scale) * scale
+        grid_max_y = math.ceil(max_y / scale) * scale
+        
+        print(f"[DEBUG] Pixel-aligned grid: min_x={grid_min_x:.2f}, max_x={grid_max_x:.2f}, min_y={grid_min_y:.2f}, max_y={grid_max_y:.2f}")
+        
+        # Calculate stride (spacing between patch origins)
+        stride = patch_size_meters * (1 - overlap)
+        
+        # Calculate number of patches needed to cover the grid
+        grid_width = grid_max_x - grid_min_x
+        grid_height = grid_max_y - grid_min_y
+        n_patches_x = max(1, math.ceil(grid_width / stride))
+        n_patches_y = max(1, math.ceil(grid_height / stride))
+        
+        print(f"[DEBUG] Grid coverage: {n_patches_x}×{n_patches_y} patches with {stride:.2f}m stride")
+        
+        patches = []
+        patch_count = 0
+        
+        for i in range(n_patches_x):
+            for j in range(n_patches_y):
+                # Calculate patch origin (pixel-aligned)
+                x = grid_min_x + i * stride
+                y = grid_min_y + j * stride
+                
+                # Create patch with exact dimensions (may extend beyond AOI)
+                patch_geom_proj = ee.Geometry.Rectangle([
+                    [x, y],
+                    [x + patch_size_meters, y + patch_size_meters]
+                ], proj, False)
+                
+                # Transform back to WGS84
+                patch_geom = patch_geom_proj.transform('EPSG:4326', 1)
+                
+                # Check if patch intersects with original AOI
+                try:
+                    intersects = aoi.intersects(patch_geom, ee.ErrorMargin(1)).getInfo()
+                    if intersects:
+                        patches.append({
+                            'geometry': patch_geom,
+                            'geometry_proj': patch_geom_proj, 
+                            'x': x,
+                            'y': y,
+                            'width': patch_size_meters,
+                            'height': patch_size_meters,
+                            'pixels_x': patch_pixels,
+                            'pixels_y': patch_pixels,
+                            'projection': proj,
+                            'extends_beyond_aoi': True,
+                            'patch_id': patch_count
+                        })
+                        patch_count += 1
+                except Exception as e:
+                    print(f"[WARNING] Failed to check intersection for patch at ({x:.2f}, {y:.2f}): {e}")
+                    continue
+        
+        print(f"[SUCCESS] Created {len(patches)} pixel-aligned patches ({patch_pixels}×{patch_pixels} pixels each)")
+        return patches
+        
+    except Exception as e:
+        print(f"[ERROR] Pixel-aligned patch creation failed: {e}")
+        print("[FALLBACK] Using original patch creation method...")
+        return create_patch_geometries_fallback(aoi, patch_size_meters, overlap)
+
+def create_patch_geometries_fallback(aoi: ee.Geometry, patch_size: int, overlap: float = 0.1) -> list:
+    """Fallback to original patch creation method if pixel-aligned method fails."""
+    print("[FALLBACK] Using coordinate-based patch creation...")
+    center = aoi.centroid().coordinates().getInfo()
+    lon, lat = center
+    proj = get_local_projection(lon, lat)
+    
     try:
         aoi_proj = aoi.transform(proj, 1)
         bounds = aoi_proj.bounds(1).getInfo()
@@ -421,28 +537,11 @@ def create_patch_geometries(aoi: ee.Geometry, patch_size: int, overlap: float = 
         max_x, max_y = bounds['coordinates'][0][2]
         width = max_x - min_x
         height = max_y - min_y
-        print(f"[DEBUG] AOI bounds in {proj}: min_x={min_x}, max_x={max_x}, min_y={min_y}, max_y={max_y}")
-        print(f"[DEBUG] AOI width: {width} meters, height: {height} meters, patch_size: {patch_size} meters")
-        if width < 1 or height < 1:
-            print(f"[WARNING] Projected AOI width or height is less than 1 meter. Falling back to patch grid in degrees.")
-            raise ValueError("Projected AOI too small, fallback to degrees.")
-        # Buffer if AOI is smaller than patch_size
-        buffer_x = max(0, (patch_size - width) / 2)
-        buffer_y = max(0, (patch_size - height) / 2)
-        if buffer_x > 0 or buffer_y > 0:
-            buffer_amount = max(buffer_x, buffer_y)
-            print(f"AOI is smaller than patch_size. Buffering AOI by {buffer_amount:.2f} meters (projected).")
-            aoi_proj = aoi_proj.buffer(buffer_amount)
-            bounds = aoi_proj.bounds(1).getInfo()
-            min_x, min_y = bounds['coordinates'][0][0]
-            max_x, max_y = bounds['coordinates'][0][2]
-            width = max_x - min_x
-            height = max_y - min_y
-            print(f"[DEBUG] After buffering: min_x={min_x}, max_x={max_x}, min_y={min_y}, max_y={max_y}")
-            print(f"[DEBUG] After buffering: width={width} meters, height={height} meters")
+        
         stride = patch_size * (1 - overlap)
         n_patches_x = max(1, int(math.ceil(width / stride)))
         n_patches_y = max(1, int(math.ceil(height / stride)))
+        
         patch_geoms = []
         for i in range(n_patches_x):
             for j in range(n_patches_y):
@@ -454,44 +553,13 @@ def create_patch_geometries(aoi: ee.Geometry, patch_size: int, overlap: float = 
                 ], proj, False)
                 patch_geom = patch_geom_proj.transform('EPSG:4326', 1)
                 patch_geoms.append(patch_geom)
-        print(f"Created {len(patch_geoms)} patch geometries.")
+        
+        print(f"[FALLBACK] Created {len(patch_geoms)} patches using original method")
         return patch_geoms
-    except Exception as e:
-        print(f"Projection failed or fallback triggered: {e}, using WGS84 and patch grid in degrees.")
-        proj = 'EPSG:4326'
-        # Approximate conversion: 1 degree ≈ 111320 meters at equator
-        patch_size_deg = patch_size / 111320.0
-        stride_deg = patch_size_deg * (1 - overlap)
-        width = wgs84_max_x - wgs84_min_x
-        height = wgs84_max_y - wgs84_min_y
-        print(f"[DEBUG] AOI width in degrees: {width}, height in degrees: {height}, patch_size in degrees: {patch_size_deg}")
-        buffer_x = max(0, (patch_size_deg - width) / 2)
-        buffer_y = max(0, (patch_size_deg - height) / 2)
-        if buffer_x > 0 or buffer_y > 0:
-            buffer_amount_deg = max(buffer_x, buffer_y)
-            print(f"AOI is smaller than patch_size. Buffering AOI by {buffer_amount_deg:.6f} degrees (approximate, fallback).")
-            aoi = aoi.buffer(buffer_amount_deg)
-            wgs84_bounds = aoi.bounds().getInfo()
-            wgs84_min_x, wgs84_min_y = wgs84_bounds['coordinates'][0][0]
-            wgs84_max_x, wgs84_max_y = wgs84_bounds['coordinates'][0][2]
-            width = wgs84_max_x - wgs84_min_x
-            height = wgs84_max_y - wgs84_min_y
-            print(f"[DEBUG] After buffering: min_x={wgs84_min_x}, max_x={wgs84_max_x}, min_y={wgs84_min_y}, max_y={wgs84_max_y}")
-            print(f"[DEBUG] After buffering: width={width} degrees, height={height} degrees")
-        n_patches_x = max(1, int(math.ceil(width / stride_deg)))
-        n_patches_y = max(1, int(math.ceil(height / stride_deg)))
-        patch_geoms = []
-        for i in range(n_patches_x):
-            for j in range(n_patches_y):
-                x = wgs84_min_x + i * stride_deg
-                y = wgs84_min_y + j * stride_deg
-                patch_geom = ee.Geometry.Rectangle([
-                    [x, y],
-                    [min(x + patch_size_deg, wgs84_max_x), min(y + patch_size_deg, wgs84_max_y)]
-                ], proj, False)
-                patch_geoms.append(patch_geom)
-        print(f"Created {len(patch_geoms)} patch geometries (in degrees).")
-        return patch_geoms
+        
+    except Exception as e2:
+        print(f"[ERROR] Fallback method also failed: {e2}")
+        raise RuntimeError("Both pixel-aligned and fallback patch creation methods failed")
 
 def get_temporal_sentinel1_data(aoi: ee.Geometry, year: int, composite_method: str = 'median') -> ee.Image:
     """
@@ -712,58 +780,83 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.use_patches:
-        print(f"Creating patch geometries with size {args.patch_size}m and {args.patch_overlap*100}% overlap...")
-        patch_geoms = create_patch_geometries(aoi_buffered, args.patch_size, args.patch_overlap)
-        for i, patch_geom in enumerate(patch_geoms):
+        patch_pixels = args.patch_size // args.scale if args.patch_size else 256
+        print(f"Creating pixel-aligned patches: {patch_pixels}×{patch_pixels} pixels ({patch_pixels*args.scale}×{patch_pixels*args.scale}m) with {args.patch_overlap*100}% overlap...")
+        patches = create_pixel_aligned_patches(aoi_buffered, patch_pixels, args.scale, args.patch_overlap)
+        for i, patch in enumerate(patches):
+            patch_geom = patch['geometry']
             patch_id = f"patch{i:04d}"
-            print(f"Processing {patch_id}")
+            print(f"Processing {patch_id} ({patch['pixels_x']}×{patch['pixels_y']} pixels)")
             
             # Collect satellite data for this patch
             if args.temporal_mode:
                 print("Using Paul's 2025 temporal compositing...")
                 print("Expected band counts: S1=24, S2=132, ALOS2=24, total temporal=180+other bands")
-                s1 = get_temporal_sentinel1_data(patch_geom, args.year, args.monthly_composite).toFloat()
-                s2 = get_temporal_sentinel2_data(patch_geom, args.year, args.clouds_th, args.monthly_composite).toFloat()
-                alos2 = get_temporal_alos2_data(patch_geom, args.year, args.monthly_composite).toFloat()
+                s1 = get_temporal_sentinel1_data(patch_geom, args.year, args.monthly_composite)
+                s2 = get_temporal_sentinel2_data(patch_geom, args.year, args.clouds_th, args.monthly_composite)
+                alos2 = get_temporal_alos2_data(patch_geom, args.year, args.monthly_composite)
             else:
                 print("Using original yearly median compositing...")
-                s1 = get_sentinel1_data(patch_geom, args.year, args.start_date, args.end_date).toFloat()
-                s2 = get_sentinel2_data(patch_geom, args.year, args.start_date, args.end_date, args.clouds_th).toFloat()
-                alos2 = get_alos2_data(patch_geom, args.year, args.start_date, args.end_date, include_texture=False, speckle_filter=False).toFloat()
-            # Add ALOS2 bands (handling temporal vs non-temporal mode)
-            alos2_band_names = alos2.bandNames().getInfo()
-            patch_data = s1.addBands(s2)
+                s1 = get_sentinel1_data(patch_geom, args.year, args.start_date, args.end_date)
+                s2 = get_sentinel2_data(patch_geom, args.year, args.start_date, args.end_date, args.clouds_th)
+                alos2 = get_alos2_data(patch_geom, args.year, args.start_date, args.end_date, include_texture=False, speckle_filter=False)
             
-            if args.temporal_mode:
-                # In temporal mode, add all ALOS2 monthly bands
-                patch_data = patch_data.addBands(alos2)
-            else:
-                # In non-temporal mode, add only existing ALOS2 bands
-                if 'ALOS2_HH' in alos2_band_names:
-                    patch_data = patch_data.addBands(alos2.select('ALOS2_HH'))
-                if 'ALOS2_HV' in alos2_band_names:
-                    patch_data = patch_data.addBands(alos2.select('ALOS2_HV'))
-            dem_data = get_dem_data(patch_geom).toFloat()
-            canopy_ht = get_canopyht_data(patch_geom).toFloat()
+            # Ensure all satellite data is converted to Float32
+            if s1 is not None:
+                s1 = s1.toFloat()
+            if s2 is not None:
+                s2 = s2.toFloat()
+            if alos2 is not None:
+                alos2 = alos2.toFloat()
+            
+            # Build patch data step by step
+            patch_data = None
+            if s1 is not None:
+                patch_data = s1
+            if s2 is not None:
+                patch_data = patch_data.addBands(s2) if patch_data else s2
+            
+            # Add ALOS2 bands (handling temporal vs non-temporal mode)
+            if alos2 is not None:
+                alos2_band_names = alos2.bandNames().getInfo()
+                if args.temporal_mode:
+                    # In temporal mode, add all ALOS2 monthly bands
+                    patch_data = patch_data.addBands(alos2) if patch_data else alos2
+                else:
+                    # In non-temporal mode, add only existing ALOS2 bands
+                    if 'ALOS2_HH' in alos2_band_names:
+                        hh_band = alos2.select('ALOS2_HH')
+                        patch_data = patch_data.addBands(hh_band) if patch_data else hh_band
+                    if 'ALOS2_HV' in alos2_band_names:
+                        hv_band = alos2.select('ALOS2_HV')
+                        patch_data = patch_data.addBands(hv_band) if patch_data else hv_band
+            
+            # Add DEM and canopy height data
+            dem_data = get_dem_data(patch_geom)
+            canopy_ht = get_canopyht_data(patch_geom)
+            if dem_data is not None:
+                dem_data = dem_data.toFloat()
+                patch_data = patch_data.addBands(dem_data) if patch_data else dem_data
+            if canopy_ht is not None:
+                canopy_ht = canopy_ht.toFloat()
+                patch_data = patch_data.addBands(canopy_ht) if patch_data else canopy_ht
+            
+            # Add forest mask
             forest_mask = create_forest_mask(
                 args.mask_type,
                 patch_geom,
                 ee.Date(start_date),
                 ee.Date(end_date),
                 args.ndvi_threshold
-            ).toFloat()
-            patch_data = patch_data.addBands(dem_data).addBands(canopy_ht)
-            # Add forest mask as a band instead of using updateMask
-            patch_data = patch_data.addBands(forest_mask.rename('forest_mask'))
+            )
+            if forest_mask is not None:
+                forest_mask = forest_mask.toFloat()
+                forest_mask = forest_mask.rename('forest_mask')
+                patch_data = patch_data.addBands(forest_mask) if patch_data else forest_mask
             
             # Get GEDI vector data
             print("Loading GEDI vector data...")
             gedi_fc = get_gedi_vector_data(patch_geom, args.gedi_start_date, args.gedi_end_date, args.quantile)
-            
-            # Export GEDI vector points as CSV and GeoJSON
-            geojson_name = os.path.splitext(os.path.basename(args.aoi))[0]
-            prefix = f"{geojson_name}_{patch_id}"
-            # export_gedi_vector_points(gedi_fc, prefix)
             
             # Convert GEDI vector data to raster for the patch data
             if gedi_fc is not None:
@@ -775,32 +868,36 @@ def main():
                 
                 # Add GEDI raster to patch data
                 patch_gedi = gedi_raster.clip(patch_geom)
-                patch_data = patch_data.addBands(patch_gedi)
+                patch_data = patch_data.addBands(patch_gedi) if patch_data else patch_gedi
             
             # Ensure all bands are Float32
-            patch_data = patch_data.toFloat()
-            
-            band_count = patch_data.bandNames().length()
-            # Get geojson file name (without extension)
-            geojson_name = os.path.splitext(os.path.basename(args.aoi))[0]
-            # Compose fileNamePrefix as requested, including temporal indicator
-            temporal_suffix = "_temporal" if args.temporal_mode else ""
-            fileNamePrefix = f"{geojson_name}{temporal_suffix}_bandNum{{}}_scale{args.scale}_{patch_id}".format(band_count.getInfo() if hasattr(band_count, 'getInfo') else band_count)
-            if args.export_patches:
-                export_task = ee.batch.Export.image.toDrive(
-                    image=patch_data,
-                    description=f"{patch_id}_data",
-                    fileNamePrefix=fileNamePrefix,
-                    folder='GEE_exports',
-                    scale=args.scale,
-                    region=patch_geom,
-                    fileFormat='GeoTIFF',
-                    maxPixels=1e13,
-                    crs='EPSG:4326'
-                )
-                export_task.start()
-                print(f"Started export for {patch_id} with fileNamePrefix: {fileNamePrefix}")
-                # break  # Only export the first patch for now (testing)
+            if patch_data is not None:
+                patch_data = patch_data.toFloat()
+                
+                band_count = patch_data.bandNames().length()
+                # Get geojson file name (without extension)
+                geojson_name = os.path.splitext(os.path.basename(args.aoi))[0]
+                # Compose fileNamePrefix as requested, including temporal indicator
+                temporal_suffix = "_temporal" if args.temporal_mode else ""
+                fileNamePrefix = f"{geojson_name}{temporal_suffix}_bandNum{{}}_scale{args.scale}_{patch_id}".format(band_count.getInfo() if hasattr(band_count, 'getInfo') else band_count)
+                
+                if args.export_patches:
+                    export_task = ee.batch.Export.image.toDrive(
+                        image=patch_data,
+                        description=f"{patch_id}_data",
+                        fileNamePrefix=fileNamePrefix,
+                        folder='GEE_exports',
+                        scale=args.scale,
+                        region=patch_geom,
+                        fileFormat='GeoTIFF',
+                        maxPixels=1e13,
+                        crs='EPSG:4326'
+                    )
+                    export_task.start()
+                    print(f"Started export for {patch_id} with fileNamePrefix: {fileNamePrefix}")
+                    print(f"  Patch dimensions: {patch['pixels_x']}×{patch['pixels_y']} pixels at {args.scale}m resolution")
+            else:
+                print(f"[WARNING] No data available for {patch_id}, skipping export")
     else:
         # Fallback: process whole AOI as before
         print("Processing whole AOI (not patch-based)...")
@@ -821,17 +918,30 @@ def main():
             # Only add ALOS2 bands that exist
             alos2_band_names = alos2.bandNames().getInfo()
             data = s1.addBands(s2).addBands(alos2)
-        dem_data = get_dem_data(aoi_buffered).toFloat()
-        canopy_ht = get_canopyht_data(aoi_buffered).toFloat()
+        dem_data = get_dem_data(aoi_buffered)
+        canopy_ht = get_canopyht_data(aoi_buffered)
         forest_mask = create_forest_mask(
             args.mask_type,
             aoi_buffered,
             ee.Date(start_date),
             ee.Date(end_date),
             args.ndvi_threshold
-        ).toFloat()
-        data = data.addBands(dem_data).addBands(canopy_ht)
-        data = data.updateMask(forest_mask)
+        )
+        
+        # Convert to Float32 if not None
+        if dem_data is not None:
+            dem_data = dem_data.toFloat()
+        if canopy_ht is not None:
+            canopy_ht = canopy_ht.toFloat()
+        if forest_mask is not None:
+            forest_mask = forest_mask.toFloat()
+        # Add additional data bands
+        if dem_data is not None:
+            data = data.addBands(dem_data)
+        if canopy_ht is not None:
+            data = data.addBands(canopy_ht)
+        if forest_mask is not None:
+            data = data.updateMask(forest_mask)
         
         # Get GEDI vector data
         print("Loading GEDI vector data...")
