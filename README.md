@@ -48,7 +48,27 @@ earthengine authenticate
 
 ## Quick Start
 
+* Download reference tif file
+### Tochigi
+<!-- https://test.geospatial.jp/ckan/dataset/dchm_tochigi# -->
+```bash
+wget -O downloads/dchm_09gd4.tif https://www.geospatial.jp/ckan/dataset/f273c489-4a48-4c85-9f27-c6d82e1fb49c/resource/33f9c3e9-3773-4196-9f81-011eed50cf00/download/dchm_09gd4.tif
+```
+### Hyogo
+<!-- https://test.geospatial.jp/ckan/dataset/dchm_hyogo -->
+```bash
+wget -O downloads/dchm_05LE4.tif https://gic-hyogo.s3.ap-northeast-1.amazonaws.com/2023/rinya/dchm/dchm_05LE4.tif
+```
+
 ### Traditional 4-Step Pipeline
+```bash
+# Use 10 pixel overlap which is defaults
+python chm_main.py --aoi downloads/dchm_05LE4.geojson --year 2022 --use-patches --export-patches
+# Use 20 pixel overlap
+# python chm_main.py --aoi downloads/dchm_05LE4.geojson --year 2022 --use-patches --export-patches --patch-overlap 20
+```
+
+
 ```bash
 # Complete workflow with area of interest
 python run_main.py \

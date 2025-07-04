@@ -44,81 +44,6 @@ def get_local_projection(lon, lat):
     else:
         return 'EPSG:3857'  # Web Mercator
 
-def create_patches_from_ee_image(image: ee.Image, aoi: ee.Geometry, patch_size: int, scale: int, overlap: float = 0.1) -> List[Dict]:
-    """
-    Create patches from Earth Engine image.
-    
-    Args:
-        image: Earth Engine image to create patches from
-        aoi: Area of interest geometry
-        patch_size: Size of patches in meters
-        scale: Resolution in meters
-        overlap: Overlap between patches as a fraction (0.0 to 1.0)
-        
-    Returns:
-        List of patch dictionaries with coordinates and data
-    """
-    image = image.toFloat()
-    center = aoi.centroid().coordinates().getInfo()
-    lon, lat = center
-    proj = get_local_projection(lon, lat)
-    # Try to project AOI, fallback to EPSG:3857, then EPSG:4326
-    try:
-        aoi_proj = aoi.transform(proj, 1)
-        bounds = aoi_proj.bounds(1).getInfo()
-    except Exception as e:
-        print(f"Failed to transform AOI to {proj}: {e}. Trying EPSG:3857.")
-        try:
-            proj = 'EPSG:3857'
-            aoi_proj = aoi.transform(proj, 1)
-            bounds = aoi_proj.bounds(1).getInfo()
-        except Exception as e2:
-            print(f"Failed to transform AOI to EPSG:3857: {e2}. Using EPSG:4326.")
-            proj = 'EPSG:4326'
-            aoi_proj = aoi.transform(proj, 1)
-            bounds = aoi_proj.bounds(1).getInfo()
-    min_x, min_y = bounds['coordinates'][0][0]
-    max_x, max_y = bounds['coordinates'][0][2]
-    stride = int(patch_size * (1 - overlap))
-    width = max_x - min_x
-    height = max_y - min_y
-    n_patches_x = max(1, int(np.ceil(width / stride)))
-    n_patches_y = max(1, int(np.ceil(height / stride)))
-    print(f"Creating {n_patches_x * n_patches_y} patches with size {patch_size}m and {overlap*100}% overlap")
-    print(f"Using projection: {proj}")
-    patches = []
-    for i in range(n_patches_x):
-        for j in range(n_patches_y):
-            x = min_x + i * stride
-            y = min_y + j * stride
-            try:
-                patch_geom_proj = ee.Geometry.Rectangle([
-                    [x, y],
-                    [min(x + patch_size, max_x), min(y + patch_size, max_y)]
-                ], proj, False)
-                patch_geom = patch_geom_proj.transform('EPSG:4326', 1)
-            except Exception as e:
-                print(f"Failed to create/transform patch geometry at ({x},{y}): {e}. Skipping patch.")
-                continue
-            is_extruded = (
-                x + patch_size > max_x or
-                y + patch_size > max_y
-            )
-            actual_width = min(patch_size, max_x - x)
-            actual_height = min(patch_size, max_y - y)
-            patch_data = image.clip(patch_geom).toFloat()
-            patches.append({
-                'geometry': patch_geom,
-                'geometry_proj': patch_geom_proj,
-                'x': x,
-                'y': y,
-                'width': patch_size if not is_extruded else actual_width,
-                'height': patch_size if not is_extruded else actual_height,
-                'data': patch_data,
-                'is_extruded': is_extruded,
-                'projection': proj
-            })
-    return patches
 
 def export_patches_to_tif(patches: List[Dict], output_dir: str, prefix: str, scale: int):
     """
@@ -248,8 +173,8 @@ def parse_args():
                        help='Enable patch-based processing')
     parser.add_argument('--patch-size', type=int, default=None,
                        help='Size of patches in meters (default: calculated from scale)')
-    parser.add_argument('--patch-overlap', type=float, default=0.0,
-                       help='Overlap between patches (0.0 to 1.0)')
+    parser.add_argument('--patch-overlap', type=int, default=10,
+                       help='Overlap between patches in pixels (default: 10)')
     parser.add_argument('--export-patches', action='store_true',
                        help='Export individual patches as TIF files')
     
@@ -391,7 +316,7 @@ def export_tif_via_ee(image: ee.Image, aoi: ee.Geometry, prefix: str, scale: int
     print(f"Export started with task ID: {task_id}")
     print("The file will be available in your Google Drive once the export completes.")
     
-def create_pixel_aligned_patches(aoi: ee.Geometry, patch_pixels: int, scale: int, overlap: float = 0.0) -> list:
+def create_pixel_aligned_patches(aoi: ee.Geometry, patch_pixels: int, scale: int, overlap_pixels: int = 10) -> list:
     """
     Create patches with exact pixel dimensions aligned to pixel grid, working in WGS84.
     
@@ -399,7 +324,7 @@ def create_pixel_aligned_patches(aoi: ee.Geometry, patch_pixels: int, scale: int
         aoi: Area of interest geometry
         patch_pixels: Patch size in pixels (e.g., 256)
         scale: Resolution in meters (e.g., 10)
-        overlap: Overlap between patches (0.0 to 1.0)
+        overlap_pixels: Overlap between patches in pixels (e.g., 10)
     
     Returns:
         List of patch dictionaries with exact pixel dimensions
@@ -436,7 +361,8 @@ def create_pixel_aligned_patches(aoi: ee.Geometry, patch_pixels: int, scale: int
         print(f"[DEBUG] Area dimensions: {max_x_m-min_x_m:.2f}m × {max_y_m-min_y_m:.2f}m")
         
         # Calculate stride (spacing between patch origins)
-        stride = patch_size_meters * (1 - overlap)
+        overlap_meters = overlap_pixels * scale
+        stride = patch_size_meters - overlap_meters
         
         # Calculate number of patches needed to cover the area
         area_width = max_x_m - min_x_m
@@ -444,7 +370,7 @@ def create_pixel_aligned_patches(aoi: ee.Geometry, patch_pixels: int, scale: int
         n_patches_x = max(1, math.ceil(area_width / stride))
         n_patches_y = max(1, math.ceil(area_height / stride))
         
-        print(f"[DEBUG] Grid coverage: {n_patches_x}×{n_patches_y} patches with {stride:.2f}m stride")
+        print(f"[DEBUG] Grid coverage: {n_patches_x}×{n_patches_y} patches with {stride:.2f}m stride ({overlap_pixels} pixel overlap)")
         
         patches = []
         patch_count = 0
@@ -504,10 +430,19 @@ def create_pixel_aligned_patches(aoi: ee.Geometry, patch_pixels: int, scale: int
     except Exception as e:
         print(f"[ERROR] Pixel-aligned patch creation failed: {e}")
         print("[FALLBACK] Using original patch creation method...")
-        return create_patch_geometries_fallback(aoi, patch_size_meters, overlap)
+        return create_patch_geometries_fallback(aoi, patch_size_meters, overlap_pixels)
 
-def create_patch_geometries_fallback(aoi: ee.Geometry, patch_size: int, overlap: float = 0.1) -> list:
-    """Fallback to original patch creation method if pixel-aligned method fails."""
+def create_patch_geometries_fallback(aoi: ee.Geometry, patch_size: int, overlap_pixels: int = 10) -> list:
+    """Fallback to original patch creation method if pixel-aligned method fails.
+    
+    Args:
+        aoi: Area of interest geometry
+        patch_size: Size of patches in meters
+        overlap_pixels: Overlap between patches in pixels
+    
+    Returns:
+        List of patch geometries
+    """
     print("[FALLBACK] Using coordinate-based patch creation...")
     center = aoi.centroid().coordinates().getInfo()
     lon, lat = center
@@ -521,7 +456,11 @@ def create_patch_geometries_fallback(aoi: ee.Geometry, patch_size: int, overlap:
         width = max_x - min_x
         height = max_y - min_y
         
-        stride = patch_size * (1 - overlap)
+        # Calculate stride from pixel overlap
+        # Note: For fallback, we need to estimate scale from the original function call
+        # This is a limitation of the fallback approach
+        overlap_meters = overlap_pixels * 10  # Assume 10m scale for fallback
+        stride = patch_size - overlap_meters
         n_patches_x = max(1, int(math.ceil(width / stride)))
         n_patches_y = max(1, int(math.ceil(height / stride)))
         
@@ -764,7 +703,7 @@ def main():
 
     if args.use_patches:
         patch_pixels = args.patch_size // args.scale if args.patch_size else 256
-        print(f"Creating pixel-aligned patches: {patch_pixels}×{patch_pixels} pixels ({patch_pixels*args.scale}×{patch_pixels*args.scale}m) with {args.patch_overlap*100}% overlap...")
+        print(f"Creating pixel-aligned patches: {patch_pixels}×{patch_pixels} pixels ({patch_pixels*args.scale}×{patch_pixels*args.scale}m) with {args.patch_overlap} pixel overlap...")
         patches = create_pixel_aligned_patches(aoi_buffered, patch_pixels, args.scale, args.patch_overlap)
         break_num = 0
         for i, patch in enumerate(patches):
