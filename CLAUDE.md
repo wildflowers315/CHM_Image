@@ -95,6 +95,37 @@ python train_predict_map.py \
 python -c "from utils.mosaic_utils import create_comprehensive_mosaic; create_comprehensive_mosaic('path/to/model.pth')"
 ```
 
+#### Reference Height Training (Scenario 1 - COMPLETED)
+```bash
+# PRODUCTION: Ultra-fast training with enhanced patches + data augmentation
+python train_production_with_augmentation.py \
+  --patch-dir chm_outputs/enhanced_patches/ \
+  --output-dir chm_outputs/production_results/ \
+  --epochs 50 \
+  --batch-size 8 \
+  --learning-rate 0.001 \
+  --base-channels 64
+
+# Enhanced patches preprocessing (one-time setup for 10x+ speedup)
+python preprocess_reference_bands.py \
+  --patch-dir chm_outputs/ \
+  --reference-tif downloads/dchm_05LE4.tif \
+  --output-dir chm_outputs/enhanced_patches/ \
+  --patch-pattern "*05LE4*"
+
+# Alternative: Main script with auto-detection (detects enhanced patches automatically)
+python train_predict_map.py \
+  --patch-dir chm_outputs/ \
+  --patch-pattern "*05LE4*" \
+  --model 2d_unet \
+  --supervision-mode reference_only \
+  --reference-height-path downloads/dchm_05LE4.tif \
+  --output-dir chm_outputs/scenario1_results \
+  --epochs 50 \
+  --batch-size 8 \
+  --use-augmentation
+```
+
 ### Google Earth Engine Setup
 ```bash
 # Required before first use
@@ -280,6 +311,11 @@ Based on comprehensive testing:
 3. **U-Net models**: Require additional training/tuning for optimal performance
 
 ## Key Features
+- **Reference Height Training (Scenario 1)**: Dense supervision with airborne LiDAR data (100% coverage vs <0.3% GEDI)
+- **Enhanced Patch Preprocessing**: Pre-processed reference bands eliminate 20+ minute loading overhead (10x speedup)
+- **Data Augmentation**: Spatial transformations (flips + rotations) for 12x training data increase
+- **Ultra-Fast Training Pipeline**: Auto-detects enhanced patches vs runtime TIF loading fallback
+- **Production-Quality Training**: AdamW optimizer, cosine scheduling, early stopping, comprehensive checkpointing
 - **Shift-Aware Training**: Compensates for GEDI geolocation uncertainties with 88.0% training improvement
 - **Unified Patch-Based Training**: All models use same patch TIF input
 - **Automatic Mode Detection**: Temporal vs non-temporal based on band patterns

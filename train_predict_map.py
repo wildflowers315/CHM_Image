@@ -34,8 +34,13 @@ warnings.filterwarnings('ignore')
 # Import multi-patch functionality
 from data.multi_patch import (
     PatchInfo, PatchRegistry, PredictionMerger,
-    load_multi_patch_gedi_data, generate_multi_patch_summary,
-    count_gedi_samples_per_patch
+    load_multi_patch_gedi_data, load_multi_patch_reference_data,
+    generate_multi_patch_summary, count_gedi_samples_per_patch
+)
+
+# Import caching utilities
+from data.cache_utils import (
+    load_or_create_reference_data, load_or_create_gedi_data
 )
 
 # Import shift-aware training functionality
@@ -2030,6 +2035,283 @@ def train_3d_unet(features: np.ndarray, gedi_target: np.ndarray,
     
     return model, metrics
 
+def train_multi_patch_unet_reference(patches: List[PatchInfo], args, epochs: int = 100, 
+                                   learning_rate: float = 1e-3, weight_decay: float = 1e-4,
+                                   base_channels: int = 32, validation_split: float = 0.2) -> Tuple[object, dict]:
+    """
+    Train 2D U-Net with dense reference height supervision using image-based approach.
+    
+    This function properly trains U-Net on full image patches (256x256) with dense reference masks,
+    instead of the incorrect pixel-based approach.
+    
+    Args:
+        patches: List of patch metadata  
+        args: Training arguments containing reference_height_path
+        epochs: Number of training epochs
+        learning_rate: Learning rate for optimizer
+        weight_decay: Weight decay for regularization
+        base_channels: Base number of channels in U-Net
+        validation_split: Fraction of patches for validation
+        
+    Returns:
+        Tuple of (trained_model, training_metrics)
+    """
+    if not TORCH_AVAILABLE:
+        raise ImportError("PyTorch is required for U-Net training")
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Training 2D U-Net on device: {device}")
+    
+    # Split patches into train/validation
+    n_patches = len(patches)
+    n_val_patches = int(n_patches * validation_split)
+    n_train_patches = n_patches - n_val_patches
+    
+    # Random split of patches
+    patch_indices = np.random.permutation(n_patches)
+    train_patch_indices = patch_indices[:n_train_patches]
+    val_patch_indices = patch_indices[n_train_patches:]
+    
+    train_patches = [patches[i] for i in train_patch_indices]
+    val_patches = [patches[i] for i in val_patch_indices]
+    
+    print(f"Training patches: {len(train_patches)}, Validation patches: {len(val_patches)}")
+    
+    # Load a sample patch to determine input dimensions
+    sample_patch = train_patches[0]
+    with rasterio.open(sample_patch.file_path) as src:
+        sample_data = src.read()
+        
+        # Remove GEDI band for reference supervision
+        band_names = [src.descriptions[i] or f'band_{i+1}' for i in range(src.count)]
+        gedi_band_idx = None
+        for i, name in enumerate(band_names):
+            if 'rh' in name.lower():
+                gedi_band_idx = i
+                break
+        
+        if gedi_band_idx is not None:
+            sample_data = np.delete(sample_data, gedi_band_idx, axis=0)
+        
+        n_input_channels = sample_data.shape[0]
+        height, width = sample_data.shape[1], sample_data.shape[2]
+        
+        # Ensure 256x256 dimensions
+        if height > 256 or width > 256:
+            height, width = 256, 256
+    
+    print(f"Input dimensions: {n_input_channels} channels, {height}x{width} spatial")
+    
+    # Initialize 2D U-Net model  
+    model = Height2DUNet(in_channels=n_input_channels, n_classes=1, base_channels=base_channels)
+    model = model.to(device)
+    
+    # Setup optimizer and loss function
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    criterion = nn.MSELoss()
+    
+    # Training loop with image-based processing
+    train_losses = []
+    val_losses = []
+    best_val_loss = float('inf')
+    
+    for epoch in tqdm(range(epochs), desc="Training 2D U-Net on image patches"):
+        # Training phase
+        model.train()
+        epoch_train_loss = 0.0
+        n_train_batches = 0
+        
+        for patch_info in train_patches:
+            try:
+                # Load satellite image patch
+                with rasterio.open(patch_info.file_path) as src:
+                    patch_data = src.read()  # Shape: (bands, height, width)
+                    
+                    # Remove GEDI band
+                    band_names = [src.descriptions[i] or f'band_{i+1}' for i in range(src.count)]
+                    gedi_band_idx = None
+                    for i, name in enumerate(band_names):
+                        if 'rh' in name.lower():
+                            gedi_band_idx = i
+                            break
+                    
+                    if gedi_band_idx is not None:
+                        patch_data = np.delete(patch_data, gedi_band_idx, axis=0)
+                    
+                    # Crop to 256x256 if needed
+                    if patch_data.shape[1] > 256 or patch_data.shape[2] > 256:
+                        patch_data = patch_data[:, :256, :256]
+                    
+                    # Load corresponding reference height data
+                    from rasterio.warp import reproject, Resampling
+                    from rasterio.transform import from_bounds as transform_from_bounds
+                    
+                    with rasterio.open(args.reference_height_path) as ref_src:
+                        patch_bounds = patch_info.geospatial_bounds
+                        
+                        # Create target transform that matches the patch
+                        target_transform = transform_from_bounds(
+                            patch_bounds[0], patch_bounds[1], 
+                            patch_bounds[2], patch_bounds[3], 
+                            patch_data.shape[2], patch_data.shape[1]  # width, height
+                        )
+                        
+                        # Create destination array with same dimensions as patch
+                        reference_data = np.zeros(patch_data.shape[1:], dtype=np.float32)
+                        
+                        # Reproject reference data to match patch resolution
+                        reproject(
+                            source=rasterio.band(ref_src, 1),
+                            destination=reference_data,
+                            src_transform=ref_src.transform,
+                            src_crs=ref_src.crs,
+                            dst_transform=target_transform,
+                            dst_crs=src.crs,
+                            resampling=Resampling.average
+                        )
+                    
+                    # Create valid mask (where we have reference data)
+                    valid_mask = (reference_data > 0) & (~np.isnan(reference_data)) & (reference_data < 100)
+                    
+                    if np.sum(valid_mask) < 100:  # Skip patches with too few reference pixels
+                        continue
+                    
+                    # Convert to tensors
+                    patch_features = torch.FloatTensor(patch_data).unsqueeze(0).to(device)  # [1, C, H, W]
+                    patch_targets = torch.FloatTensor(reference_data).unsqueeze(0).unsqueeze(0).to(device)  # [1, 1, H, W]
+                    valid_mask_tensor = torch.FloatTensor(valid_mask).unsqueeze(0).unsqueeze(0).to(device)  # [1, 1, H, W]
+                    
+                    # Replace NaN in features with zeros
+                    patch_features = torch.nan_to_num(patch_features, nan=0.0)
+                    
+                    optimizer.zero_grad()
+                    
+                    # Forward pass
+                    predictions = model(patch_features)  # [1, 1, H, W]
+                    
+                    # Calculate loss only on valid reference pixels
+                    if torch.sum(valid_mask_tensor) > 0:
+                        masked_predictions = predictions * valid_mask_tensor
+                        masked_targets = patch_targets * valid_mask_tensor
+                        
+                        # Only compute loss where we have valid reference data
+                        loss = criterion(masked_predictions[valid_mask_tensor > 0], 
+                                       masked_targets[valid_mask_tensor > 0])
+                    else:
+                        continue  # Skip if no valid pixels
+                    
+                    # Backward pass
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                    optimizer.step()
+                    
+                    epoch_train_loss += loss.item()
+                    n_train_batches += 1
+                    
+            except Exception as e:
+                print(f"Error processing training patch {patch_info.patch_id}: {e}")
+                continue
+        
+        avg_train_loss = epoch_train_loss / max(1, n_train_batches)
+        train_losses.append(avg_train_loss)
+        
+        # Validation phase  
+        model.eval()
+        epoch_val_loss = 0.0
+        n_val_batches = 0
+        
+        with torch.no_grad():
+            for patch_info in val_patches:
+                try:
+                    # Same processing as training but without gradients
+                    with rasterio.open(patch_info.file_path) as src:
+                        patch_data = src.read()
+                        
+                        # Remove GEDI band
+                        band_names = [src.descriptions[i] or f'band_{i+1}' for i in range(src.count)]
+                        gedi_band_idx = None
+                        for i, name in enumerate(band_names):
+                            if 'rh' in name.lower():
+                                gedi_band_idx = i
+                                break
+                        
+                        if gedi_band_idx is not None:
+                            patch_data = np.delete(patch_data, gedi_band_idx, axis=0)
+                        
+                        if patch_data.shape[1] > 256 or patch_data.shape[2] > 256:
+                            patch_data = patch_data[:, :256, :256]
+                    
+                        with rasterio.open(args.reference_height_path) as ref_src:
+                            patch_bounds = patch_info.geospatial_bounds
+                            target_transform = transform_from_bounds(
+                                patch_bounds[0], patch_bounds[1], 
+                                patch_bounds[2], patch_bounds[3], 
+                                patch_data.shape[2], patch_data.shape[1]
+                            )
+                            
+                            reference_data = np.zeros(patch_data.shape[1:], dtype=np.float32)
+                            reproject(
+                                source=rasterio.band(ref_src, 1),
+                                destination=reference_data,
+                                src_transform=ref_src.transform,
+                                src_crs=ref_src.crs,
+                                dst_transform=target_transform,
+                                dst_crs=src.crs,
+                                resampling=Resampling.average
+                            )
+                        
+                        valid_mask = (reference_data > 0) & (~np.isnan(reference_data)) & (reference_data < 100)
+                        
+                        if np.sum(valid_mask) < 100:
+                            continue
+                        
+                        patch_features = torch.FloatTensor(patch_data).unsqueeze(0).to(device)
+                        patch_targets = torch.FloatTensor(reference_data).unsqueeze(0).unsqueeze(0).to(device)
+                        valid_mask_tensor = torch.FloatTensor(valid_mask).unsqueeze(0).unsqueeze(0).to(device)
+                        
+                        patch_features = torch.nan_to_num(patch_features, nan=0.0)
+                        
+                        predictions = model(patch_features)
+                        
+                        if torch.sum(valid_mask_tensor) > 0:
+                            masked_predictions = predictions * valid_mask_tensor
+                            masked_targets = patch_targets * valid_mask_tensor
+                            loss = criterion(masked_predictions[valid_mask_tensor > 0], 
+                                           masked_targets[valid_mask_tensor > 0])
+                            epoch_val_loss += loss.item()
+                            n_val_batches += 1
+                            
+                except Exception as e:
+                    print(f"Error processing validation patch {patch_info.patch_id}: {e}")
+                    continue
+        
+        avg_val_loss = epoch_val_loss / max(1, n_val_batches)
+        val_losses.append(avg_val_loss)
+        
+        # Track best model
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
+        
+        # Print progress
+        if epoch % 5 == 0:
+            print(f"Epoch {epoch}/{epochs}, Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}")
+    
+    # Calculate final metrics
+    metrics = {
+        'train_loss': train_losses[-1] if train_losses else 0.0,
+        'val_loss': val_losses[-1] if val_losses else 0.0,
+        'best_val_loss': best_val_loss,
+        'n_train_patches': len(train_patches),
+        'n_val_patches': len(val_patches),
+        'input_channels': n_input_channels
+    }
+    
+    print(f"✅ Image-based reference height training completed!")
+    print(f"📈 Best validation loss: {best_val_loss:.4f}")
+    print(f"📊 Training patches: {len(train_patches)}, Validation patches: {len(val_patches)}")
+    
+    return model, metrics
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Unified patch-based training for all model types')
     
@@ -2092,6 +2374,21 @@ def parse_args():
     # Training configuration - simple train/validation split
     parser.add_argument('--validation-split', type=float, default=0.2,
                        help='Fraction of patches to use for validation (default: 0.2)')
+    
+    # Reference height supervision (Scenario 1: Reference-Only Training)
+    parser.add_argument('--reference-height-path', type=str, default=None,
+                       help='Path to reference height TIF for dense supervision (e.g., downloads/dchm_05LE4.tif)')
+    parser.add_argument('--supervision-mode', type=str, default='gedi', 
+                       choices=['gedi', 'reference', 'reference_only'],
+                       help='Supervision mode: gedi (sparse GEDI), reference_only (dense reference), reference (both)')
+    parser.add_argument('--min-reference-samples', type=int, default=1000,
+                       help='Minimum valid reference pixels per patch for training (reference supervision only)')
+    parser.add_argument('--min-gedi-samples', type=int, default=10,
+                       help='Minimum valid GEDI pixels per patch for training (GEDI supervision only)')
+    parser.add_argument('--mode', type=str, default='train', choices=['train', 'predict'],
+                       help='Mode: train (apply filtering) or predict (process all patches)')
+    parser.add_argument('--use-augmentation', action='store_true',
+                       help='Enable data augmentation (12x increase with flips + rotations)')
     
     return parser.parse_args()
 
@@ -2419,9 +2716,29 @@ def train_multi_patch_from_files(args):
     
     # Load multi-patch training data
     print("📖 Loading training data from all patches...")
-    # Apply GEDI filtering only in training mode
-    min_gedi_samples = args.min_gedi_samples if args.mode == 'train' else 0
-    combined_features, combined_targets = load_multi_patch_gedi_data(patches, target_band='rh', min_gedi_samples=min_gedi_samples)
+    
+    # Choose data loading strategy based on supervision mode
+    if hasattr(args, 'supervision_mode') and args.supervision_mode in ['reference', 'reference_only']:
+        if not hasattr(args, 'reference_height_path') or not args.reference_height_path:
+            raise ValueError("Reference height path must be specified for reference supervision")
+        
+        print(f"🏔️  Using reference height supervision: {args.supervision_mode}")
+        print(f"📁 Reference TIF: {args.reference_height_path}")
+        
+        # Apply reference filtering only in training mode
+        min_reference_samples = args.min_reference_samples if args.mode == 'train' else 0
+        combined_features, combined_targets = load_multi_patch_reference_data(
+            patches, 
+            reference_tif_path=args.reference_height_path,
+            min_reference_samples=min_reference_samples
+        )
+        
+    else:
+        # Default GEDI supervision
+        print("🛰️  Using GEDI supervision (sparse)")
+        # Apply GEDI filtering only in training mode
+        min_gedi_samples = args.min_gedi_samples if args.mode == 'train' else 0
+        combined_features, combined_targets = load_multi_patch_gedi_data(patches, target_band='rh', min_gedi_samples=min_gedi_samples)
     
     print(f"🎯 Combined training dataset:")
     print(f"  - Features shape: {combined_features.shape}")
@@ -2654,11 +2971,83 @@ def train_multi_patch(args):
     if args.model == '3d_unet' and not is_temporal:
         raise ValueError("3D U-Net requires temporal data. Use '2d_unet' or use temporal patches.")
     
-    # Load multi-patch training data
+    # Choose training strategy based on model type and available data
+    if args.model == '2d_unet' and hasattr(args, 'supervision_mode') and args.supervision_mode in ['reference', 'reference_only']:
+        
+        # Check if enhanced patches with pre-processed reference bands are available
+        enhanced_patch_dir = os.path.join(os.path.dirname(args.patch_dir), 'enhanced_patches')
+        enhanced_patches = glob.glob(os.path.join(enhanced_patch_dir, "ref_*05LE4*.tif"))
+        
+        if len(enhanced_patches) > 0:
+            # Use ultra-fast training with enhanced patches
+            print("⚡ Using ULTRA-FAST training with enhanced patches")
+            print(f"📁 Enhanced patches directory: {enhanced_patch_dir}")
+            print(f"🔍 Found {len(enhanced_patches)} enhanced patches")
+            print("✅ No runtime TIF loading needed - reference data is pre-processed!")
+            
+            from fast_training_with_enhanced_patches import train_ultra_fast_unet
+            model, train_metrics = train_ultra_fast_unet(
+                patch_dir=enhanced_patch_dir,
+                output_dir=args.output_dir,
+                epochs=args.epochs,
+                learning_rate=args.learning_rate,
+                batch_size=args.batch_size,
+                base_channels=args.base_channels,
+                validation_split=args.validation_split
+            )
+            
+        else:
+            # Fallback to standard batch training with runtime TIF loading
+            print("🚀 Using standard batch training (runtime TIF loading)")
+            print(f"🏔️  Using reference height supervision: {args.supervision_mode}")
+            print(f"📁 Reference TIF: {args.reference_height_path}")
+            print("💡 Tip: Use preprocess_reference_bands.py to create enhanced patches for 10x+ speedup")
+            
+            from fast_batch_training import train_fast_batch_unet
+            model, train_metrics = train_fast_batch_unet(
+                patches, args,
+                epochs=args.epochs,
+                learning_rate=args.learning_rate,
+                weight_decay=args.weight_decay,
+                base_channels=args.base_channels,
+                validation_split=args.validation_split
+            )
+        
+        # Save the model
+        model_path = os.path.join(args.output_dir, 'multi_patch_2d_unet_model.pth')
+        if TORCH_AVAILABLE:
+            torch.save(model.state_dict(), model_path)
+            print(f"💾 Saved 2D U-Net model to: {model_path}")
+        
+        # Save training metrics
+        metrics_path = os.path.join(args.output_dir, 'multi_patch_training_metrics.json')
+        with open(metrics_path, 'w') as f:
+            json.dump(train_metrics, f, indent=2)
+        print(f"📊 Training metrics saved to: {metrics_path}")
+            
+        # Early return - skip the rest of the function
+        return
+    
+    # Load multi-patch training data for other models
     print("📖 Loading training data from all patches...")
-    # Apply GEDI filtering only in training mode
-    min_gedi_samples = args.min_gedi_samples if args.mode == 'train' else 0
-    combined_features, combined_targets = load_multi_patch_gedi_data(patches, target_band='rh', min_gedi_samples=min_gedi_samples)
+    
+    # Choose data loading strategy based on supervision mode
+    if hasattr(args, 'supervision_mode') and args.supervision_mode in ['reference', 'reference_only']:
+        if not hasattr(args, 'reference_height_path') or not args.reference_height_path:
+            raise ValueError("Reference height path must be specified for reference supervision")
+        
+        print(f"🏔️  Using reference height supervision: {args.supervision_mode}")
+        print(f"📁 Reference TIF: {args.reference_height_path}")
+        
+        # Use cached reference data loading (avoids 20+ minute loading time)
+        combined_features, combined_targets = load_or_create_reference_data(patches, args)
+        
+    else:
+        # Default GEDI supervision
+        print("🛰️  Using GEDI supervision (sparse)")
+        
+        # Use cached GEDI data loading
+        combined_features, combined_targets = load_or_create_gedi_data(patches, args)
     
     print(f"🎯 Combined training dataset:")
     print(f"  - Features shape: {combined_features.shape}")
@@ -2695,29 +3084,50 @@ def train_multi_patch(args):
         # U-Net multi-patch training with improved approach
         print("🚀 Using improved U-Net multi-patch training")
         
-        # For U-Net models, use the combined features from filtered patches
+        # For U-Net models, need to handle reference vs GEDI supervision differently
         print(f"📊 Training on {len(patches)} filtered patches")
-        print(f"📊 Total GEDI samples: {len(combined_targets)}")
+        if hasattr(args, 'supervision_mode') and args.supervision_mode in ['reference', 'reference_only']:
+            print(f"📊 Total reference samples: {len(combined_targets)}")
+            supervision_type = "reference"
+        else:
+            print(f"📊 Total GEDI samples: {len(combined_targets)}")
+            supervision_type = "gedi"
         print(f"📊 Using validation split: {args.validation_split}")
         
-        # Use first patch as reference for metadata
-        reference_patch = patches[0]
-        first_patch_features, first_patch_target, band_info = load_patch_data(
-            reference_patch.file_path, normalize_bands=True
-        )
-        
         if args.model == '2d_unet':
-            model, train_metrics = train_2d_unet(
-                first_patch_features, first_patch_target,
-                epochs=args.epochs,
-                learning_rate=args.learning_rate,
-                weight_decay=args.weight_decay,
-                base_channels=args.base_channels,
-                huber_delta=args.huber_delta,
-                shift_radius=args.shift_radius
-            )
+            if supervision_type == "reference":
+                # Use image-based U-Net training with proper spatial data
+                print("🚀 Using image-based U-Net training (proper spatial approach)")
+                model, train_metrics = train_multi_patch_unet_reference(
+                    patches, args,
+                    epochs=args.epochs,
+                    learning_rate=args.learning_rate,
+                    weight_decay=args.weight_decay,
+                    base_channels=args.base_channels,
+                    validation_split=args.validation_split
+                )
+            else:
+                # Use first patch for GEDI supervision (existing method)
+                reference_patch = patches[0]
+                first_patch_features, first_patch_target, band_info = load_patch_data(
+                    reference_patch.file_path, normalize_bands=True
+                )
+                model, train_metrics = train_2d_unet(
+                    first_patch_features, first_patch_target,
+                    epochs=args.epochs,
+                    learning_rate=args.learning_rate,
+                    weight_decay=args.weight_decay,
+                    base_channels=args.base_channels,
+                    huber_delta=args.huber_delta,
+                    shift_radius=args.shift_radius
+                )
             model_path = os.path.join(args.output_dir, 'multi_patch_2d_unet_model.pth')
         else:  # 3d_unet
+            # Use first patch for 3D U-Net (temporal data)
+            reference_patch = patches[0]
+            first_patch_features, first_patch_target, band_info = load_patch_data(
+                reference_patch.file_path, normalize_bands=True
+            )
             model, train_metrics = train_3d_unet(
                 first_patch_features, first_patch_target,
                 epochs=args.epochs,
@@ -3020,6 +3430,15 @@ if __name__ == "__main__":
     # GEDI filtering options
     parser.add_argument('--min-gedi-samples', type=int, default=10,
                        help='Minimum number of valid GEDI samples per patch for training (default: 10)')
+    
+    # Reference height supervision options
+    parser.add_argument('--reference-height-path', type=str,
+                       help='Path to reference height TIF file for dense supervision')
+    parser.add_argument('--supervision-mode', type=str, default='gedi',
+                       choices=['gedi', 'reference', 'reference_only'],
+                       help='Supervision mode: gedi (sparse), reference (dense), reference_only (no GEDI)')
+    parser.add_argument('--min-reference-samples', type=int, default=100,
+                       help='Minimum number of valid reference samples per patch (default: 100)')
     
     # Verbose output
     parser.add_argument('--verbose', action='store_true',
