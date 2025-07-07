@@ -60,6 +60,13 @@ wget -O downloads/dchm_09gd4.tif https://www.geospatial.jp/ckan/dataset/f273c489
 wget -O downloads/dchm_05LE4.tif https://gic-hyogo.s3.ap-northeast-1.amazonaws.com/2023/rinya/dchm/dchm_05LE4.tif
 ```
 
+### Kochi
+<!-- https://www.geospatial.jp/ckan/dataset/3e0eed6c-f709-4b47-bf1f-640303f1ef86/resource/51828f81-19ad-447d-8289-a79bb3ecc4b0/download/dchm_04hf3.tif -->
+```bash
+wget -O downloads/dchm_04hf3.tif https://www.geospatial.jp/ckan/dataset/3e0eed6c-f709-4b47-bf1f-640303f1ef86/resource/51828f81-19ad-447d-8289-a79bb3ecc4b0/download/dchm_04hf3.tif
+```
+
+
 ### Traditional 4-Step Pipeline
 ```bash
 # Use 10 pixel overlap which is defaults

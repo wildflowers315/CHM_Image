@@ -732,39 +732,94 @@ def main():
             if alos2 is not None:
                 alos2 = alos2.toFloat()
             
-            # Build patch data step by step
-            patch_data = None
+            # Build patch data step by step with robust error handling
+            print("Building patch data...")
+            valid_bands = []
+            
+            # Add S1 bands if available
             if s1 is not None:
-                patch_data = s1
+                try:
+                    band_names = s1.bandNames().getInfo()
+                    if band_names:
+                        valid_bands.append(s1)
+                        print(f"  Added S1 data: {len(band_names)} bands")
+                    else:
+                        print("  S1 data has no valid bands, skipping")
+                except Exception as e:
+                    print(f"  Failed to process S1 data: {e}")
+            
+            # Add S2 bands if available
             if s2 is not None:
-                patch_data = patch_data.addBands(s2) if patch_data else s2
+                try:
+                    band_names = s2.bandNames().getInfo()
+                    if band_names:
+                        valid_bands.append(s2)
+                        print(f"  Added S2 data: {len(band_names)} bands")
+                    else:
+                        print("  S2 data has no valid bands, skipping")
+                except Exception as e:
+                    print(f"  Failed to process S2 data: {e}")
             
-            # Add ALOS2 bands (handling temporal vs non-temporal mode)
+            # Add ALOS2 bands if available
             if alos2 is not None:
-                alos2_band_names = alos2.bandNames().getInfo()
-                if args.temporal_mode:
-                    # In temporal mode, add all ALOS2 monthly bands
-                    patch_data = patch_data.addBands(alos2) if patch_data else alos2
-                else:
-                    # In non-temporal mode, add only existing ALOS2 bands
-                    if 'ALOS2_HH' in alos2_band_names:
-                        hh_band = alos2.select('ALOS2_HH')
-                        patch_data = patch_data.addBands(hh_band) if patch_data else hh_band
-                    if 'ALOS2_HV' in alos2_band_names:
-                        hv_band = alos2.select('ALOS2_HV')
-                        patch_data = patch_data.addBands(hv_band) if patch_data else hv_band
+                try:
+                    alos2_band_names = alos2.bandNames().getInfo()
+                    if alos2_band_names:
+                        if args.temporal_mode:
+                            # In temporal mode, add all ALOS2 monthly bands
+                            valid_bands.append(alos2)
+                            print(f"  Added ALOS2 temporal data: {len(alos2_band_names)} bands")
+                        else:
+                            # In non-temporal mode, add only existing ALOS2 bands
+                            alos2_bands_to_add = []
+                            if 'ALOS2_HH' in alos2_band_names:
+                                alos2_bands_to_add.append(alos2.select('ALOS2_HH'))
+                            if 'ALOS2_HV' in alos2_band_names:
+                                alos2_bands_to_add.append(alos2.select('ALOS2_HV'))
+                            
+                            if alos2_bands_to_add:
+                                if len(alos2_bands_to_add) == 1:
+                                    valid_bands.append(alos2_bands_to_add[0])
+                                else:
+                                    combined_alos2 = alos2_bands_to_add[0]
+                                    for band in alos2_bands_to_add[1:]:
+                                        combined_alos2 = combined_alos2.addBands(band)
+                                    valid_bands.append(combined_alos2)
+                                print(f"  Added ALOS2 non-temporal data: {len(alos2_bands_to_add)} bands")
+                    else:
+                        print("  ALOS2 data has no valid bands, skipping")
+                except Exception as e:
+                    print(f"  Failed to process ALOS2 data: {e}")
             
-            # Add DEM and canopy height data
+            # Add DEM data if available
             dem_data = get_dem_data(patch_geom)
-            canopy_ht = get_canopyht_data(patch_geom)
             if dem_data is not None:
-                dem_data = dem_data.toFloat()
-                patch_data = patch_data.addBands(dem_data) if patch_data else dem_data
-            if canopy_ht is not None:
-                canopy_ht = canopy_ht.toFloat()
-                patch_data = patch_data.addBands(canopy_ht) if patch_data else canopy_ht
+                try:
+                    dem_data = dem_data.toFloat()
+                    band_names = dem_data.bandNames().getInfo()
+                    if band_names:
+                        valid_bands.append(dem_data)
+                        print(f"  Added DEM data: {len(band_names)} bands")
+                    else:
+                        print("  DEM data has no valid bands, skipping")
+                except Exception as e:
+                    print(f"  Failed to process DEM data: {e}")
             
-            # Add forest mask
+            # Add canopy height data if available
+            canopy_ht = get_canopyht_data(patch_geom)
+            if canopy_ht is not None:
+                try:
+                    canopy_ht = canopy_ht.toFloat()
+                    band_names = canopy_ht.bandNames().getInfo()
+                    if band_names:
+                        valid_bands.append(canopy_ht)
+                        print(f"  Added canopy height data: {len(band_names)} bands")
+                    else:
+                        print("  Canopy height data has no valid bands, skipping")
+                except Exception as e:
+                    print(f"  Failed to process canopy height data: {e}")
+            
+            # Add forest mask if available
             forest_mask = create_forest_mask(
                 args.mask_type,
                 patch_geom,
@@ -773,25 +828,53 @@ def main():
                 args.ndvi_threshold
             )
             if forest_mask is not None:
-                forest_mask = forest_mask.toFloat()
-                forest_mask = forest_mask.rename('forest_mask')
-                patch_data = patch_data.addBands(forest_mask) if patch_data else forest_mask
+                try:
+                    forest_mask = forest_mask.toFloat().rename('forest_mask')
+                    band_names = forest_mask.bandNames().getInfo()
+                    if band_names:
+                        valid_bands.append(forest_mask)
+                        print(f"  Added forest mask: {len(band_names)} bands")
+                    else:
+                        print("  Forest mask has no valid bands, skipping")
+                except Exception as e:
+                    print(f"  Failed to process forest mask: {e}")
             
-            # Get GEDI vector data
+            # Add GEDI data if available
             print("Loading GEDI vector data...")
             gedi_fc = get_gedi_vector_data(patch_geom, args.gedi_start_date, args.gedi_end_date, args.quantile)
-            
-            # Convert GEDI vector data to raster for the patch data
             if gedi_fc is not None:
-                # Convert to raster using reduceToImage
-                gedi_raster = gedi_fc.select(args.quantile).reduceToImage(
-                    properties=[args.quantile],
-                    reducer=ee.Reducer.first()
-                ).rename('rh').toFloat()
-                
-                # Add GEDI raster to patch data
-                patch_gedi = gedi_raster.clip(patch_geom)
-                patch_data = patch_data.addBands(patch_gedi) if patch_data else patch_gedi
+                try:
+                    # Convert to raster using reduceToImage
+                    gedi_raster = gedi_fc.select(args.quantile).reduceToImage(
+                        properties=[args.quantile],
+                        reducer=ee.Reducer.first()
+                    ).rename('rh').toFloat()
+                    
+                    # Add GEDI raster to patch data
+                    patch_gedi = gedi_raster.clip(patch_geom)
+                    band_names = patch_gedi.bandNames().getInfo()
+                    if band_names:
+                        valid_bands.append(patch_gedi)
+                        print(f"  Added GEDI data: {len(band_names)} bands")
+                    else:
+                        print("  GEDI data has no valid bands, skipping")
+                except Exception as e:
+                    print(f"  Failed to process GEDI data: {e}")
+            
+            # Combine all valid bands
+            patch_data = None
+            if valid_bands:
+                try:
+                    patch_data = valid_bands[0]
+                    for band_data in valid_bands[1:]:
+                        patch_data = patch_data.addBands(band_data)
+                    patch_data = patch_data.toFloat()
+                    print(f"  Successfully combined {len(valid_bands)} data sources")
+                except Exception as e:
+                    print(f"  Failed to combine bands: {e}")
+                    patch_data = None
+            else:
+                print("  No valid data sources available for this patch")
             
             # Ensure all bands are Float32
             if patch_data is not None:

@@ -23,6 +23,7 @@ def get_dem_data(aoi: ee.Geometry):
         print(f"Error loading SRTM data: {e}")
     try:    
         print("Downloading ALOS AW3D30 data")
+        # dem = ee.ImageCollection("JAXA/ALOS/AW3D30/V4_1").mosaic().select('DSM')
         dem = ee.ImageCollection("JAXA/ALOS/AW3D30/V3_2").mosaic().select('DSM')
         # proj = dem.select(0).projection()
         # slope = ee.Terrain.slope(dem.setDefaultProjection(proj)) # does not work
