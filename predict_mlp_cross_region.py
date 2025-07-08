@@ -131,17 +131,19 @@ class MLPPredictor:
             crs = src.crs
             height, width = src.height, src.width
         
-        # Extract satellite bands (first 30 bands)
+        # Extract satellite bands (first 30 bands) - consistent for all patch types
+        # Enhanced patches: 32 bands (30 satellite + GEDI + reference) -> use first 30 
+        # Original patches: 30-31 bands -> use first 30 satellite bands
         if patch_data.shape[0] >= 30:
-            satellite_bands = patch_data[:30]
+            satellite_features = patch_data[:30]  # Always use first 30 satellite bands
         else:
             raise ValueError(f"Patch must have at least 30 bands, got {patch_data.shape[0]}")
         
         # Handle NaN values
-        satellite_bands = np.nan_to_num(satellite_bands, nan=0.0, posinf=0.0, neginf=0.0)
+        satellite_features = np.nan_to_num(satellite_features, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Reshape for prediction
-        pixels = satellite_bands.reshape(satellite_bands.shape[0], -1).T  # (H*W, bands)
+        pixels = satellite_features.reshape(satellite_features.shape[0], -1).T  # (H*W, 30_bands)
         
         # Apply preprocessing
         if self.scaler is not None:

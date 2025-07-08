@@ -174,10 +174,10 @@ scontrol show job <JOBID>
 ### Log Monitoring
 ```bash
 # Real-time log monitoring
-tail -f logs/2d_training_<JOBID>.txt
+tail -f logs/<JOBID>_2d_training.txt
 
 # Check error logs
-cat logs/2d_training_error_<JOBID>.txt
+cat logs/<JOBID>_2d_training_error.txt
 
 # Monitor progress
 python tmp/monitor_training.py
@@ -246,9 +246,9 @@ chm_outputs/
 ### Output Structure
 ```
 logs/                           # SLURM job logs
-├── 2d_training_<JOBID>.txt
-├── 2d_training_error_<JOBID>.txt
-└── rf_simple_<JOBID>.txt
+├── <JOBID>_2d_training.txt
+├── <JOBID>_2d_training_error.txt
+└── <JOBID>_rf_simple.txt
 
 results_2d/                     # Training results
 ├── rf/
@@ -353,7 +353,7 @@ sbatch run_2d_training.sh
 # Monitor resource usage
 squeue -u $USER -l  # Check allocated resources
 
-# Adjust resource requests based on actual usage
+# Adjust resource requests based on actual usageyo
 sacct -j <JOBID> --format=JobID,MaxRSS,MaxVMSize,CPUTime
 ```
 
@@ -379,7 +379,7 @@ echo "Job ID: $SLURM_JOB_ID" >> training_log.txt
 sacct -j <JOBID> --format=JobID,ExitCode,State
 
 # Examine error logs
-grep -i error logs/2d_training_error_<JOBID>.txt
+grep -i error logs/<JOBID>_2d_training_error.txt
 
 # Check resource limits
 sacct -j <JOBID> --format=JobID,MaxRSS,MaxVMSize,ReqMem
