@@ -8,6 +8,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 source chm_env/bin/activate 
 - **IMPORTANT**: Always activate the Python environment using `source chm_env/bin/activate` before running any Python code
 
+## Reference Documentation
+
+### Project Planning and Status
+- **Main Training Plan**: `docs/reference_height_training_plan.md` - Comprehensive 3-scenario comparison framework
+- **Scenario 3 Implementation**: `docs/scenario3_implementation_plan.md` - Detailed plan for target region GEDI adaptation
+- **Slurm Instructions**: `docs/slurm_instruction.md` - HPC usage guidelines for Annuna server
+
+### Key Documentation Files
+- **Training Plan**: Complete implementation guide for all scenarios with performance metrics
+- **Scenario 3 Plan**: Focused implementation plan for Tochigi region GEDI fine-tuning
+- **HPC Guidelines**: Slurm commands, sinteractive usage, and batch processing tips
+
 ## File Organization Guidelines
 
 - length of python file should be below 500~800 lines because longer scripts are hard to read. If each file getting longer, we can consider to split them into several modules.
@@ -52,13 +64,14 @@ source chm_env/bin/activate
 - **Key Files**: `train_ensemble_mlp.py`, `predict_ensemble.py`, `models/ensemble_mlp.py`
 - **Lesson**: Spatial models require dense supervision; pixel-level models suit sparse data
 
-### 🔄 **PROPOSED SCENARIOS**
+### ❌ **FAILED SCENARIOS**
 
-#### **Scenario 2B: Pixel-Level GEDI Training** - 🔄 **PROPOSED**
-- **Approach**: Train GEDI MLP on sparse GEDI rh data (pixel-level)
-- **Ensemble**: Combine GEDI MLP + Reference MLP (dual-MLP ensemble)
-- **Expected**: R² > 0.3 for GEDI MLP, R² > 0.5 for ensemble
-- **Key Innovation**: Both models use same architecture but different supervision sources
+#### **Scenario 2B: Pixel-Level GEDI Training** - ❌ **FAILED**
+- **Status**: Completed but failed with poor performance
+- **Results**: Kochi R² = -5.14, Tochigi R² = -9.95 (worse than Scenario 1)
+- **Root Cause**: Sparse GEDI supervision insufficient even with pixel-level approach
+- **Key Files**: `train_production_mlp.py`, `predict_ensemble.py`, `evaluate_ensemble_cross_region.py`
+- **Lesson**: Both spatial (2A) and pixel-level (2B) GEDI approaches fail with sparse supervision
 
 #### **Scenario 2C: Shift-Aware Pixel Training** - 💡 **FUTURE CONCEPT**
 - **Approach**: Extract surrounding pixels (1-3 radius) from GEDI points
@@ -94,15 +107,16 @@ source chm_env/bin/activate
 | **U-Net (Scenario 1)** | 0.074 | N/A | ❌ Deprecated |
 | **MLP (Scenario 1)** | 0.5026 | +0.012 (bias-corrected) | ✅ Production |
 | **Ensemble (Scenario 2A)** | 0.1611 | -8.58 to -7.95 | ❌ Failed |
-| **Dual-MLP (Scenario 2B)** | TBD | TBD | 🔄 Proposed |
+| **Dual-MLP (Scenario 2B)** | N/A | -5.14 to -9.95 | ❌ Failed |
 
 ### 🔧 **Implementation Guidelines**
 
-#### **For Scenario 2B Implementation**
-1. Modify `train_production_mlp.py` to support `--supervision-mode gedi_only`
-2. Extract GEDI pixels from enhanced patches for training
-3. Train dual-MLP ensemble combining GEDI MLP + Reference MLP
-4. Evaluate cross-region performance with CRS-aware evaluation
+#### **For Scenario 3 Implementation** - 🔄 **CURRENT FOCUS**
+1. Fine-tune pre-trained GEDI models on Tochigi region data (30 patches)
+2. Test both spatial U-Net and pixel-level MLP adaptation approaches
+3. Train dual-track ensembles with adapted GEDI models + Reference MLP
+4. Evaluate target region adaptation effectiveness vs failed Scenario 2 results
+5. **Detailed Plan**: See `docs/scenario3_implementation_plan.md`
 
 #### **Bias Correction Application**
 ```python

@@ -515,12 +515,15 @@ Cross-Region Validation:
 - [ ] **Scenario 2B**: Train dual-MLP ensemble combining GEDI MLP + reference MLP 🔄 **PROPOSED**
 - [ ] **Scenario 2B**: Apply dual-MLP ensemble to target regions 🔄 **PROPOSED**
 
-### Week 5-6: Scenario 3 Implementation
-- [ ] **Scenario 3**: Use Scenario 2 models as starting point
-- [ ] **Scenario 3**: Implement GEDI adaptation framework in `train_predict_map.py`
-- [ ] **Scenario 3**: Fine-tune GEDI models on Tochigi and Kochi GEDI data
-- [ ] **Scenario 3**: Apply adapted ensemble models to target regions
-- [ ] **Scenario 3**: Enhanced `predict_ensemble.py` for adapted models
+### Week 5-6: Scenario 3 Implementation - 🔄 **CURRENT FOCUS**
+- [ ] **Scenario 3**: Use existing pre-trained models as starting point ✅ **IDENTIFIED**
+- [ ] **Scenario 3**: Implement GEDI adaptation framework in `train_predict_map.py` and `train_production_mlp.py`
+- [ ] **Scenario 3**: Fine-tune both U-Net and MLP GEDI models on Tochigi GEDI data (30 patches)
+- [ ] **Scenario 3**: Train dual-track ensembles (U-Net+MLP and MLP+MLP)
+- [ ] **Scenario 3**: Evaluate both ensemble approaches on Tochigi region
+- [ ] **Scenario 3**: Compare adaptation effectiveness vs Scenario 2 baseline
+
+**📋 Detailed Implementation Plan**: See `docs/scenario3_implementation_plan.md`
 
 ### Week 7-8: Comprehensive Analysis & Documentation
 - [ ] **Validation**: Implement `validate_scenario_comparison.py` framework
