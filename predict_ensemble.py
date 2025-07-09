@@ -22,6 +22,9 @@ import logging
 from models.ensemble_mlp import create_ensemble_model
 from models.trainers.shift_aware_trainer import ShiftAwareUNet
 
+# Import band utilities
+from utils.band_utils import extract_bands_by_name, find_satellite_bands, check_patch_compatibility
+
 def setup_logging(output_dir):
     """Setup logging configuration"""
     log_file = os.path.join(output_dir, 'prediction.log')
@@ -66,9 +69,43 @@ class EnsemblePredictor:
         
     def _load_gedi_model(self, model_path):
         """Load GEDI shift-aware U-Net model"""
+        # Use 30 satellite features (hardcoded for U-Net compatibility)
+        # Note: U-Net architecture expects fixed input channels
         model = ShiftAwareUNet(in_channels=30).to(self.device)
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
-        model.load_state_dict(checkpoint)
+        
+        # Handle different checkpoint formats
+        if 'model_state_dict' in checkpoint:
+            # Checkpoint format with model_state_dict key
+            model.load_state_dict(checkpoint['model_state_dict'])
+        elif isinstance(checkpoint, dict) and 'enc1.0.weight' in checkpoint:
+            # Direct state_dict format for U-Net
+            model.load_state_dict(checkpoint)
+        elif isinstance(checkpoint, dict) and 'layers.0.weight' in checkpoint:
+            # This is an MLP model, not U-Net - for Scenario 2B
+            print("⚠️  Warning: Loading MLP model instead of U-Net. This might be for Scenario 2B.")
+            # Import MLP class and load as MLP
+            sys.path.append('.')
+            from train_production_mlp import AdvancedReferenceHeightMLP
+            model = AdvancedReferenceHeightMLP(
+                input_dim=30,
+                hidden_dims=[256, 128, 64],
+                dropout_rate=0.3,
+                use_residuals=False
+            ).to(self.device)
+            if 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                model.load_state_dict(checkpoint)
+        else:
+            # Try to load as direct state_dict
+            try:
+                model.load_state_dict(checkpoint)
+            except Exception as e:
+                print(f"⚠️  Error loading GEDI model: {e}")
+                print(f"Available keys: {list(checkpoint.keys()) if isinstance(checkpoint, dict) else 'Not a dict'}")
+                raise
+        
         model.eval()
         return model
         
@@ -111,6 +148,8 @@ class EnsemblePredictor:
             numpy array of shape (256, 256) with ensemble predictions
         """
         # Extract satellite features (first 30 bands)
+        # Note: This function receives patch_data directly, so we use legacy indexing
+        # Band utilities are used in the calling function (predict_region)
         satellite_features = patch_data[:30].astype(np.float32)
         
         # Handle NaN values (same as training)
@@ -204,10 +243,26 @@ class EnsemblePredictor:
         
         for patch_file in tqdm(patch_files, desc=f"Predicting {region_name}"):
             try:
-                # Load patch
+                # Load patch using band utilities for robust band extraction
                 with rasterio.open(patch_file) as src:
-                    patch_data = src.read()
                     profile = src.profile
+                
+                # Check patch compatibility first
+                if not check_patch_compatibility(patch_file, "reference"):
+                    print(f"⚠️  Skipping incompatible patch: {patch_file}")
+                    prediction_info['failed_predictions'] += 1
+                    continue
+                
+                # Extract bands using robust utilities
+                try:
+                    satellite_features, _ = extract_bands_by_name(patch_file, supervision_mode="reference")
+                    # Create patch_data in expected format for predict_patch
+                    patch_data = np.concatenate([satellite_features, np.zeros((2, *satellite_features.shape[1:]))], axis=0)
+                except Exception as e:
+                    # Fallback to legacy loading
+                    print(f"⚠️  Band utilities failed, using legacy loading: {e}")
+                    with rasterio.open(patch_file) as src:
+                        patch_data = src.read()
                 
                 # Generate prediction
                 ensemble_pred = self.predict_patch(patch_data)

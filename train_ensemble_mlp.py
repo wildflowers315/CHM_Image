@@ -24,6 +24,9 @@ from tqdm import tqdm
 from datetime import datetime
 import logging
 
+# Import band utilities
+from utils.band_utils import extract_bands_by_name, find_band_by_name, check_patch_compatibility
+
 # Import ensemble models
 from models.ensemble_mlp import create_ensemble_model
 
@@ -132,17 +135,35 @@ class EnsembleDataset(Dataset):
         
         for patch_file in tqdm(self.patch_files, desc="Generating ensemble data"):
             try:
-                # Load patch data
-                with rasterio.open(patch_file) as src:
-                    patch_data = src.read()
-                
-                if patch_data.shape[0] < 32:  # Need satellite + GEDI + reference
+                # Check patch compatibility first
+                if not check_patch_compatibility(patch_file, "reference"):
                     continue
                 
-                # Extract bands
-                satellite_features = patch_data[:30].astype(np.float32)
-                gedi_band = patch_data[30]  # GEDI supervision
-                reference_band = patch_data[31]  # Reference height target
+                # Extract bands using robust utilities
+                try:
+                    satellite_features, reference_band = extract_bands_by_name(patch_file, supervision_mode="reference")
+                    satellite_features = satellite_features.astype(np.float32)
+                    
+                    # Get GEDI band separately
+                    gedi_band_idx = find_band_by_name(patch_file, "rh")
+                    if gedi_band_idx is None:
+                        continue  # Skip patches without GEDI data
+                    
+                    with rasterio.open(patch_file) as src:
+                        patch_data = src.read()
+                        gedi_band = patch_data[gedi_band_idx]
+                        
+                except Exception as e:
+                    # Fallback to legacy method
+                    with rasterio.open(patch_file) as src:
+                        patch_data = src.read()
+                    
+                    if patch_data.shape[0] < 32:  # Need satellite + GEDI + reference
+                        continue
+                    
+                    satellite_features = patch_data[:30].astype(np.float32)
+                    gedi_band = patch_data[30]  # GEDI supervision
+                    reference_band = patch_data[31]  # Reference height target
                 
                 # Handle NaN values in satellite features (same as GEDI training)
                 for band_idx in range(30):

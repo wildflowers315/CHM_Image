@@ -18,6 +18,9 @@ from tqdm import tqdm
 import pickle
 from sklearn.preprocessing import QuantileTransformer
 import json
+
+# Import band utilities
+from utils.band_utils import extract_bands_by_name, check_patch_compatibility
 from datetime import datetime
 import logging
 
@@ -131,13 +134,17 @@ class MLPPredictor:
             crs = src.crs
             height, width = src.height, src.width
         
-        # Extract satellite bands (first 30 bands) - consistent for all patch types
-        # Enhanced patches: 32 bands (30 satellite + GEDI + reference) -> use first 30 
-        # Original patches: 30-31 bands -> use first 30 satellite bands
-        if patch_data.shape[0] >= 30:
-            satellite_features = patch_data[:30]  # Always use first 30 satellite bands
-        else:
-            raise ValueError(f"Patch must have at least 30 bands, got {patch_data.shape[0]}")
+        # Extract satellite bands using robust band utilities
+        # This approach works with all patch types (original, enhanced, future formats)
+        try:
+            satellite_features, _ = extract_bands_by_name(patch_file, supervision_mode="reference")
+        except Exception as e:
+            print(f"⚠️  Warning: Could not extract bands using band utilities, falling back to legacy method: {e}")
+            # Fallback to legacy method if band utilities fail
+            if patch_data.shape[0] >= 30:
+                satellite_features = patch_data[:30]  # Always use first 30 satellite bands
+            else:
+                raise ValueError(f"Patch must have at least 30 bands, got {patch_data.shape[0]}")
         
         # Handle NaN values
         satellite_features = np.nan_to_num(satellite_features, nan=0.0, posinf=0.0, neginf=0.0)

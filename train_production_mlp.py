@@ -25,6 +25,9 @@ from datetime import datetime
 import logging
 from collections import Counter
 
+# Import band utilities
+from utils.band_utils import extract_bands_by_name, check_patch_compatibility
+
 class AdvancedReferenceHeightMLP(nn.Module):
     """Advanced MLP with residual connections and attention"""
     
@@ -107,7 +110,7 @@ class ProductionReferenceDataset(Dataset):
     
     def __init__(self, patch_dir: str, reference_tif_path: str, patch_pattern: str = "*05LE4*",
                  max_samples_per_patch: int = 100000, min_height: float = 0.0, max_height: float = 100.0,
-                 use_height_stratification: bool = True, augment_factor: int = 3):
+                 use_height_stratification: bool = True, augment_factor: int = 3, supervision_mode: str = "reference"):
         
         self.patch_dir = Path(patch_dir)
         self.reference_tif_path = reference_tif_path
@@ -117,6 +120,7 @@ class ProductionReferenceDataset(Dataset):
         self.max_height = max_height
         self.use_height_stratification = use_height_stratification
         self.augment_factor = augment_factor
+        self.supervision_mode = supervision_mode  # "reference" or "gedi_only"
         
         # Find all patches
         self.patch_files = self._find_patches()
@@ -124,16 +128,30 @@ class ProductionReferenceDataset(Dataset):
         
         # Load all data
         self.features, self.targets, self.height_bins = self._load_all_data()
-        print(f"Loaded {len(self.features)} training samples")
+        print(f"Loaded {len(self.features)} training samples with {supervision_mode} supervision")
         
         # Advanced preprocessing
         self._preprocess_features()
         
     def _find_patches(self):
-        """Find all available patches"""
+        """Find all available patches compatible with supervision mode"""
         pattern = str(self.patch_dir / self.patch_pattern)
-        files = glob.glob(pattern)
-        return sorted(files)
+        all_files = glob.glob(pattern)
+        
+        # Filter patches based on compatibility with supervision mode
+        compatible_files = []
+        skipped_count = 0
+        
+        for file_path in all_files:
+            if check_patch_compatibility(file_path, self.supervision_mode):
+                compatible_files.append(file_path)
+            else:
+                skipped_count += 1
+        
+        if skipped_count > 0:
+            print(f"⚠️  Skipped {skipped_count} patches incompatible with {self.supervision_mode} supervision")
+        
+        return sorted(compatible_files)
     
     def _load_all_data(self):
         """Load and preprocess all training data"""
@@ -173,47 +191,45 @@ class ProductionReferenceDataset(Dataset):
         return features, targets, height_bins
     
     def _extract_patch_data(self, patch_file):
-        """Extract training data from a single patch"""
-        with rasterio.open(patch_file) as src:
-            patch_data = src.read()
-        
-        if patch_data.shape[0] == 31:
-            satellite_bands = patch_data[:30]
-            reference_band = patch_data[30]
-        else:
+        """Extract training data from a single patch using band utilities"""
+        try:
+            # Extract bands by name using utility function
+            satellite_bands, target_band = extract_bands_by_name(patch_file, self.supervision_mode)
+        except Exception as e:
+            print(f"⚠️  Error extracting bands from {patch_file}: {e}")
             return np.array([]), np.array([])
         
-        # Advanced NaN handling
+        # Advanced NaN handling for satellite bands
         satellite_bands = np.nan_to_num(satellite_bands, nan=0.0, posinf=0.0, neginf=0.0)
         
-        # Get valid reference pixels
-        valid_mask = (~np.isnan(reference_band)) & \
-                    (reference_band >= self.min_height) & \
-                    (reference_band <= self.max_height)
+        # Get valid target pixels
+        valid_mask = (~np.isnan(target_band)) & \
+                    (target_band >= self.min_height) & \
+                    (target_band <= self.max_height)
         
         if not np.any(valid_mask):
             return np.array([]), np.array([])
         
         # Extract pixels
         satellite_pixels = satellite_bands.reshape(satellite_bands.shape[0], -1).T
-        reference_pixels = reference_band.flatten()
+        target_pixels = target_band.flatten()
         
         # Apply mask
         valid_pixels = valid_mask.flatten()
         satellite_pixels = satellite_pixels[valid_pixels]
-        reference_pixels = reference_pixels[valid_pixels]
+        target_pixels = target_pixels[valid_pixels]
         
         # Height-stratified sampling
         if self.use_height_stratification and len(satellite_pixels) > self.max_samples_per_patch:
-            indices = self._stratified_sample(reference_pixels, self.max_samples_per_patch)
+            indices = self._stratified_sample(target_pixels, self.max_samples_per_patch)
             satellite_pixels = satellite_pixels[indices]
-            reference_pixels = reference_pixels[indices]
+            target_pixels = target_pixels[indices]
         elif len(satellite_pixels) > self.max_samples_per_patch:
             indices = np.random.choice(len(satellite_pixels), self.max_samples_per_patch, replace=False)
             satellite_pixels = satellite_pixels[indices]
-            reference_pixels = reference_pixels[indices]
+            target_pixels = target_pixels[indices]
         
-        return satellite_pixels.astype(np.float32), reference_pixels.astype(np.float32)
+        return satellite_pixels.astype(np.float32), target_pixels.astype(np.float32)
     
     def _stratified_sample(self, heights, n_samples):
         """Stratified sampling to ensure representation across height ranges"""
@@ -414,7 +430,8 @@ def train_production_mlp(dataset, model, device, epochs=200, batch_size=2048,
             best_val_r2 = val_r2
             patience_counter = 0
             
-            # Save best model
+            # Save best model with supervision mode in filename
+            model_filename = f'chm_outputs/production_mlp_{dataset.supervision_mode}_best.pth'
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
@@ -422,8 +439,9 @@ def train_production_mlp(dataset, model, device, epochs=200, batch_size=2048,
                 'val_r2': val_r2,
                 'val_loss': val_loss,
                 'scaler': dataset.scaler,
-                'selected_features': dataset.selected_features
-            }, 'chm_outputs/production_mlp_best.pth')
+                'selected_features': dataset.selected_features,
+                'supervision_mode': dataset.supervision_mode
+            }, model_filename)
             
         else:
             patience_counter += 1
@@ -437,9 +455,11 @@ def train_production_mlp(dataset, model, device, epochs=200, batch_size=2048,
 
 def main():
     parser = argparse.ArgumentParser(description='Production MLP training for reference heights')
-    parser.add_argument('--patch-dir', default='chm_outputs/', help='Directory containing patches')
+    parser.add_argument('--patch-dir', default='chm_outputs/enhanced_patches/', help='Directory containing patches')
     parser.add_argument('--reference-tif', default='downloads/dchm_05LE4.tif', help='Reference height TIF')
     parser.add_argument('--output-dir', default='chm_outputs/production_mlp_results/', help='Output directory')
+    parser.add_argument('--supervision-mode', choices=['reference', 'gedi_only'], default='reference', 
+                       help='Supervision mode: reference (dense) or gedi_only (sparse)')
     parser.add_argument('--epochs', type=int, default=200, help='Number of epochs')
     parser.add_argument('--batch-size', type=int, default=2048, help='Batch size')
     parser.add_argument('--learning-rate', type=float, default=0.001, help='Learning rate')
@@ -457,15 +477,17 @@ def main():
     print(f"🖥️  Device: {device}")
     print(f"📁 Patch directory: {args.patch_dir}")
     print(f"📊 Output directory: {args.output_dir}")
+    print(f"🎯 Supervision mode: {args.supervision_mode}")
     
     try:
         # Load dataset
-        print("📂 Loading production reference dataset...")
+        print(f"📂 Loading production dataset with {args.supervision_mode} supervision...")
         dataset = ProductionReferenceDataset(
             patch_dir=args.patch_dir,
             reference_tif_path=args.reference_tif,
             max_samples_per_patch=args.max_samples,
-            augment_factor=args.augment_factor
+            augment_factor=args.augment_factor,
+            supervision_mode=args.supervision_mode
         )
         
         # Create model
@@ -491,6 +513,7 @@ def main():
         )
         
         print(f"\n🎉 Training completed!")
+        print(f"🎯 Supervision mode: {args.supervision_mode}")
         print(f"🏆 Best validation R²: {best_val_r2:.4f}")
         print(f"📈 Improvement over U-Net: {best_val_r2 - 0.074:+.4f}")
         
@@ -501,18 +524,25 @@ def main():
         else:
             print("📈 Moderate improvement - consider further optimization")
         
+        # Save model path info
+        model_path = f'chm_outputs/production_mlp_{args.supervision_mode}_best.pth'
+        print(f"💾 Best model saved to: {model_path}")
+        
         # Save training results
         results = {
+            'supervision_mode': args.supervision_mode,
             'best_val_r2': float(best_val_r2),
             'improvement_over_unet': float(best_val_r2 - 0.074),
             'train_losses': [float(x) for x in train_losses],
             'val_losses': [float(x) for x in val_losses],
             'val_r2_scores': [float(x) for x in val_r2_scores],
             'total_samples': int(len(dataset)),
-            'input_features': int(input_dim)
+            'input_features': int(input_dim),
+            'model_path': model_path
         }
         
-        with open(os.path.join(args.output_dir, 'production_mlp_results.json'), 'w') as f:
+        results_filename = f'production_mlp_{args.supervision_mode}_results.json'
+        with open(os.path.join(args.output_dir, results_filename), 'w') as f:
             json.dump(results, f, indent=2)
         
         print(f"📁 Results saved to: {args.output_dir}")
