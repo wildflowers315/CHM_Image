@@ -2938,6 +2938,43 @@ def train_multi_patch(args):
     
     print(f"📊 Discovered {len(patches)} patches")
     
+    # Handle shift-aware U-Net training early (bypass unified data loading)
+    if args.model == 'shift_aware_unet':
+        if not SHIFT_AWARE_AVAILABLE:
+            raise ImportError("Shift-aware trainer not available. Please ensure models/trainers/shift_aware_trainer.py is accessible.")
+        
+        print("🔄 Using advanced shift-aware U-Net training...")
+        
+        # Use automatic patch detection and splitting
+        train_patches, val_patches = auto_find_patches()
+        
+        # Initialize trainer with optimal settings from experiments
+        trainer = ShiftAwareTrainer(
+            shift_radius=args.shift_radius,
+            learning_rate=args.learning_rate,
+            batch_size=args.batch_size
+        )
+        
+        # Train model
+        training_history = trainer.train(
+            train_patches=train_patches,
+            val_patches=val_patches,
+            epochs=args.epochs,
+            output_dir=args.output_dir
+        )
+        
+        model_path = training_history['model_path']
+        print(f"💾 Shift-aware U-Net saved to: {model_path}")
+        
+        # Create comprehensive mosaic if requested
+        if args.generate_prediction and MOSAIC_UTILS_AVAILABLE:
+            print("🗺️  Creating comprehensive prediction mosaic...")
+            mosaic_name = f"comprehensive_mosaic_{args.model}.tif"
+            mosaic_metadata = create_comprehensive_mosaic(model_path, mosaic_name)
+            print(f"📁 Comprehensive mosaic: {mosaic_name}")
+        
+        return  # Exit early for shift-aware training
+    
     # Validate patch consistency
     is_consistent = patch_registry.validate_consistency()
     if not is_consistent:

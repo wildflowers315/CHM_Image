@@ -557,17 +557,18 @@ def load_multi_patch_gedi_data(patches: List[PatchInfo],
     # Handle NaN/inf values in features
     print(f"Cleaning features: checking for NaN/inf values...")
     
-    # Find rows with any NaN or inf values
-    valid_rows = np.all(np.isfinite(combined_features), axis=1)
-    n_invalid = np.sum(~valid_rows)
-    
-    if n_invalid > 0:
-        print(f"  Removing {n_invalid} samples with NaN/inf values")
-        combined_features = combined_features[valid_rows]
-        combined_targets = combined_targets[valid_rows]
-    
-    # Replace any remaining NaN with zeros (shouldn't happen but safety)
+    # Replace NaN/inf values with zeros instead of removing samples
+    # This handles missing bands (e.g., GLO30 slope/aspect) properly
+    original_shape = combined_features.shape
     combined_features = np.nan_to_num(combined_features, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    # Check for completely zero features (all bands missing)
+    zero_features = np.all(combined_features == 0, axis=1)
+    if np.sum(zero_features) > 0:
+        print(f"  Found {np.sum(zero_features)} samples with all features zero - keeping them")
+    
+    print(f"  Processed features: {original_shape} -> {combined_features.shape}")
+    print(f"  Replaced NaN/inf values with zeros for missing bands")
     
     print(f"Total training samples: {len(combined_targets)}")
     print(f"Feature dimensions: {combined_features.shape}")

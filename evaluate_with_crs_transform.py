@@ -41,8 +41,11 @@ def evaluate_with_crs_transform(pred_dir: str, ref_tif: str, region_name: str, o
     print(f'  Bounds: {ref_bounds}')
     print(f'  NoData: {ref_nodata}')
     
-    # Find prediction files
+    # Find prediction files (support both prediction.tif and ensemble patterns)
     pred_files = glob.glob(os.path.join(pred_dir, '*_prediction.tif'))
+    if len(pred_files) == 0:
+        # Try ensemble pattern
+        pred_files = glob.glob(os.path.join(pred_dir, 'ensemble_*.tif'))
     print(f'Found {len(pred_files)} prediction files')
     
     all_pred_vals = []

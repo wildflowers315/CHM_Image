@@ -37,6 +37,26 @@ This plan implements a comprehensive experimental framework to compare three dis
 - **Validation**: Apply ensemble model directly to Tochigi and Kochi regions (no adaptation)
 - **Key Question**: Does combined supervision improve generalization without fine-tuning?
 
+**❌ SCENARIO 2A STATUS: FAILED**
+- **Results**: Kochi R² = -8.58, Tochigi R² = -7.95 (200x worse than Scenario 1)
+- **Root Cause**: Poor GEDI model performance (R² ≈ 0.16) with sparse GEDI supervision
+- **Ensemble Weights**: GEDI=-0.0013, MLP=0.7512 (GEDI ignored due to poor quality)
+- **Conclusion**: Sparse GEDI supervision produces unusable spatial context model
+
+### Scenario 2B: Pixel-Level GEDI Training (Sparse GEDI rh Supervision)
+**Objective**: Train GEDI model with pixel-level approach using sparse GEDI rh data as targets
+- **Training Data**: Hyogo patches - extract only pixels with GEDI rh data for MLP training
+- **Model**: Ensemble combining GEDI-supervised MLP + reference-supervised MLP
+- **Rationale**: Pixel-level approach matches sparse GEDI supervision pattern (like reference MLP)
+- **Key Question**: Can GEDI rh pixel-level training provide complementary signal to reference training?
+
+### Scenario 2C: Shift-Aware Pixel Training (Future Concept)
+**Objective**: Advanced pixel-level training with shift-aware loss for geolocation uncertainty
+- **Training Data**: Extract surrounding pixels (1-3 radius) from each GEDI point
+- **Loss Function**: Calculate losses with different shifts, choose minimum loss per patch
+- **Rationale**: Compensates for GEDI geolocation uncertainty at pixel level
+- **Status**: Ambitious future concept - keep as research idea for later discussion
+
 ### Scenario 3: Reference + GEDI Training + Target Region Adaptation
 **Objective**: Evaluate full pipeline with cross-region GEDI fine-tuning
 - **Training Data**: Hyogo patches with both reference height TIF and GEDI supervision
@@ -121,9 +141,9 @@ python predict_reference_only.py \
 ### Scenario 2 Implementation: Reference + GEDI Training (No Adaptation)
 
 #### S2.1 Component Model Training
-**Train both GEDI shift-aware and reference height models**
+**Use proven high-performance models: GEDI shift-aware U-Net + production MLP**
 
-**GEDI Shift-Aware Model**:
+**GEDI Shift-Aware Model** (Train new):
 ```bash
 python train_predict_map.py \
   --patch-dir chm_outputs/ \
@@ -136,27 +156,20 @@ python train_predict_map.py \
   --batch-size 4
 ```
 
-**Reference Height Model**:
-```bash
-python train_predict_map.py \
-  --patch-dir chm_outputs/ \
-  --include-pattern "*05LE4*" \
-  --model 2d_unet \
-  --reference-height-path downloads/dchm_05LE4.tif \
-  --supervision-mode reference \
-  --output-dir chm_outputs/scenario2_reference_2d_unet \
-  --epochs 100 \
-  --learning-rate 0.0001 \
-  --batch-size 4
-```
+**Reference Height Model** ✅ **COMPLETED - Use Existing MLP**:
+- **Model**: `chm_outputs/production_mlp_best.pth` (R² = 0.5026)
+- **Performance**: 6.7x better than U-Net approach
+- **Architecture**: Advanced MLP with feature attention and residual connections
+- **Training**: Already completed with 30 satellite features + reference height supervision
+- **Advantage**: Pixel-level regression perfectly suited for sparse supervision patterns
 
 #### S2.2 Ensemble Model Training
-**Train MLP ensemble combining both models**
+**Train MLP ensemble combining GEDI U-Net + Production MLP outputs**
 
 ```bash
 python train_ensemble_mlp.py \
   --gedi-model-path chm_outputs/scenario2_gedi_shift_aware/gedi_shift_aware_model_hyogo.pth \
-  --reference-model-path chm_outputs/scenario2_reference_2d_unet/reference_2d_unet_model_hyogo.pth \
+  --reference-model-path chm_outputs/production_mlp_best.pth \
   --patch-dir chm_outputs/ \
   --include-pattern "*05LE4*" \
   --reference-height-path downloads/dchm_05LE4.tif \
@@ -165,6 +178,11 @@ python train_ensemble_mlp.py \
   --learning-rate 0.001
 ```
 
+**Ensemble Architecture**:
+- **Input**: 2 features (GEDI U-Net prediction + MLP prediction)
+- **Target**: Reference height TIF supervision (same as Scenario 1)
+- **Advantage**: Combines spatial context (U-Net) with pixel-level precision (MLP)
+
 #### S2.3 Direct Cross-Region Application (No Adaptation)
 **Apply ensemble model directly to target regions without fine-tuning**
 
@@ -172,7 +190,7 @@ python train_ensemble_mlp.py \
 # Apply to Tochigi
 python predict_ensemble.py \
   --gedi-model chm_outputs/scenario2_gedi_shift_aware/gedi_shift_aware_model_hyogo.pth \
-  --reference-model chm_outputs/scenario2_reference_2d_unet/reference_2d_unet_model_hyogo.pth \
+  --reference-model chm_outputs/production_mlp_best.pth \
   --ensemble-mlp chm_outputs/scenario2_ensemble_mlp/ensemble_mlp_model_hyogo.pth \
   --patch-dir chm_outputs/ \
   --include-pattern "*09gd4*" \
@@ -181,12 +199,84 @@ python predict_ensemble.py \
 # Apply to Kochi
 python predict_ensemble.py \
   --gedi-model chm_outputs/scenario2_gedi_shift_aware/gedi_shift_aware_model_hyogo.pth \
-  --reference-model chm_outputs/scenario2_reference_2d_unet/reference_2d_unet_model_hyogo.pth \
+  --reference-model chm_outputs/production_mlp_best.pth \
   --ensemble-mlp chm_outputs/scenario2_ensemble_mlp/ensemble_mlp_model_hyogo.pth \
   --patch-dir chm_outputs/ \
   --include-pattern "*04hf3*" \
   --output-dir chm_outputs/scenario2_kochi_predictions
 ```
+
+### Scenario 2B Implementation: Pixel-Level GEDI Training (Sparse GEDI rh Supervision) - 🔄 PROPOSED
+
+#### S2B.1 GEDI Pixel-Level MLP Training
+**Train MLP on pixels with GEDI rh data (similar to reference MLP approach)**
+
+```bash
+python train_production_mlp.py \
+  --patch-dir chm_outputs/ \
+  --include-pattern "*05LE4*" \
+  --supervision-mode gedi_only \
+  --output-dir chm_outputs/scenario2b_gedi_mlp \
+  --epochs 100 \
+  --learning-rate 0.001 \
+  --batch-size 32
+```
+
+**Training Data**:
+- **Input**: 30 satellite features (same as reference MLP)
+- **Target**: GEDI rh values (sparse coverage ~0.3% of pixels)
+- **Architecture**: Same AdvancedReferenceHeightMLP but trained on GEDI pixels
+- **Expected Coverage**: ~1000-3000 GEDI pixels per region (vs 41K reference pixels)
+
+#### S2B.2 Dual-MLP Ensemble Training
+**Train ensemble combining GEDI-supervised MLP + reference-supervised MLP**
+
+```bash
+python train_ensemble_mlp.py \
+  --gedi-model-path chm_outputs/scenario2b_gedi_mlp/gedi_mlp_best.pth \
+  --reference-model-path chm_outputs/production_mlp_best.pth \
+  --patch-dir chm_outputs/ \
+  --include-pattern "*05LE4*" \
+  --reference-height-path downloads/dchm_05LE4.tif \
+  --output-dir chm_outputs/scenario2b_dual_mlp_ensemble \
+  --epochs 100 \
+  --learning-rate 0.001
+```
+
+**Ensemble Architecture**:
+- **Input**: 2 features (GEDI MLP prediction + Reference MLP prediction)
+- **Target**: Reference height TIF supervision (dense coverage)
+- **Expected Advantage**: GEDI MLP provides complementary signal to reference MLP
+- **Hypothesis**: Different training data sources capture different forest characteristics
+
+#### S2B.3 Cross-Region Application
+**Apply dual-MLP ensemble to target regions**
+
+```bash
+# Apply to Tochigi
+python predict_ensemble.py \
+  --gedi-model chm_outputs/scenario2b_gedi_mlp/gedi_mlp_best.pth \
+  --reference-model chm_outputs/production_mlp_best.pth \
+  --ensemble-mlp chm_outputs/scenario2b_dual_mlp_ensemble/ensemble_mlp_model_hyogo.pth \
+  --patch-dir chm_outputs/ \
+  --include-pattern "*09gd4*" \
+  --output-dir chm_outputs/scenario2b_tochigi_predictions
+
+# Apply to Kochi  
+python predict_ensemble.py \
+  --gedi-model chm_outputs/scenario2b_gedi_mlp/gedi_mlp_best.pth \
+  --reference-model chm_outputs/production_mlp_best.pth \
+  --ensemble-mlp chm_outputs/scenario2b_dual_mlp_ensemble/ensemble_mlp_model_hyogo.pth \
+  --patch-dir chm_outputs/ \
+  --include-pattern "*04hf3*" \
+  --output-dir chm_outputs/scenario2b_kochi_predictions
+```
+
+**Expected Performance**:
+- **GEDI MLP**: R² > 0.3 (better than spatial U-Net due to pixel-level approach)
+- **Ensemble**: R² > 0.5 (improvement over single models)
+- **Rationale**: Both MLPs use same architecture but different supervision sources
+- **Advantage**: Combines GEDI geolocation patterns with reference height precision
 
 ### Scenario 3 Implementation: Reference + GEDI Training + Target Adaptation
 
@@ -233,7 +323,7 @@ python train_predict_map.py \
 # Tochigi with adapted GEDI model
 python predict_ensemble.py \
   --gedi-model chm_outputs/scenario3_tochigi_gedi_adaptation/adapted_gedi_model_tochigi.pth \
-  --reference-model chm_outputs/scenario2_reference_2d_unet/reference_2d_unet_model_hyogo.pth \
+  --reference-model chm_outputs/production_mlp_best.pth \
   --ensemble-mlp chm_outputs/scenario2_ensemble_mlp/ensemble_mlp_model_hyogo.pth \
   --patch-dir chm_outputs/ \
   --include-pattern "*09gd4*" \
@@ -242,7 +332,7 @@ python predict_ensemble.py \
 # Kochi with adapted GEDI model
 python predict_ensemble.py \
   --gedi-model chm_outputs/scenario3_kochi_gedi_adaptation/adapted_gedi_model_kochi.pth \
-  --reference-model chm_outputs/scenario2_reference_2d_unet/reference_2d_unet_model_hyogo.pth \
+  --reference-model chm_outputs/production_mlp_best.pth \
   --ensemble-mlp chm_outputs/scenario2_ensemble_mlp/ensemble_mlp_model_hyogo.pth \
   --patch-dir chm_outputs/ \
   --include-pattern "*04hf3*" \
@@ -415,12 +505,15 @@ Cross-Region Validation:
 - ✅ Realistic canopy height predictions (16.0±1.3m across regions)
 
 ### Week 3-4: Scenario 2 Implementation
-- [ ] **Scenario 2**: Train GEDI shift-aware model on Hyogo region
-- [ ] **Scenario 2**: Train reference height 2D U-Net on Hyogo region
-- [ ] **Scenario 2**: Implement ensemble MLP architecture (`models/ensemble_mlp.py`)
-- [ ] **Scenario 2**: Train ensemble model combining both outputs (`train_ensemble_mlp.py`)
-- [ ] **Scenario 2**: Implement `predict_ensemble.py` inference pipeline
-- [ ] **Scenario 2**: Apply ensemble model to Tochigi and Kochi regions (no adaptation)
+- [x] **Scenario 2A**: Train GEDI shift-aware model on Hyogo region ❌ **FAILED - Poor performance**
+- [x] **Scenario 2A**: Train reference height 2D U-Net on Hyogo region ✅ **Use existing MLP instead**
+- [x] **Scenario 2A**: Implement ensemble MLP architecture (`models/ensemble_mlp.py`) ✅ **COMPLETED**
+- [x] **Scenario 2A**: Train ensemble model combining both outputs (`train_ensemble_mlp.py`) ❌ **FAILED - GEDI ignored**
+- [x] **Scenario 2A**: Implement `predict_ensemble.py` inference pipeline ✅ **COMPLETED**
+- [x] **Scenario 2A**: Apply ensemble model to Tochigi and Kochi regions (no adaptation) ❌ **FAILED - 200x worse**
+- [ ] **Scenario 2B**: Train GEDI pixel-level MLP on sparse GEDI rh data 🔄 **PROPOSED**
+- [ ] **Scenario 2B**: Train dual-MLP ensemble combining GEDI MLP + reference MLP 🔄 **PROPOSED**
+- [ ] **Scenario 2B**: Apply dual-MLP ensemble to target regions 🔄 **PROPOSED**
 
 ### Week 5-6: Scenario 3 Implementation
 - [ ] **Scenario 3**: Use Scenario 2 models as starting point
@@ -849,3 +942,69 @@ The MLP-based reference height training with bias correction is **production-rea
 - ✅ Ensemble training foundation for Scenarios 2 & 3
 
 **Status**: **FULLY COMPLETED** - Revolutionary improvement achieved and deployed
+
+---
+
+## 📋 **SCENARIO 2A COMPLETION STATUS**
+
+### ❌ **SCENARIO 2A: FAILED BUT INFORMATIVE**
+
+**Scenario 2A (Reference + GEDI Training with Spatial U-Net)** was completed but failed to achieve the expected performance improvements:
+
+#### 🎯 **Key Results**
+- **Ensemble Training**: R² = 0.1611 (learned weights: GEDI=-0.0013, MLP=0.7512)
+- **Cross-Region Performance**: 
+  - Kochi: R² = -8.58, RMSE = 13.37m
+  - Tochigi: R² = -7.95, RMSE = 16.56m
+- **Comparison**: 200x worse than Scenario 1 baseline (R² ≈ -0.04)
+
+#### 🔍 **Root Cause Analysis**
+1. **GEDI Model Failure**: Spatial U-Net with sparse GEDI supervision achieved only R² ≈ 0.16
+2. **Architecture Mismatch**: Spatial convolutions inappropriate for sparse supervision (<0.3% coverage)
+3. **Ensemble Compensation**: Ensemble learned to ignore poor GEDI model (weight ≈ 0)
+4. **Systematic Bias**: Ensemble showed severe overestimation in both regions
+
+#### 🧠 **Key Insights**
+- **Spatial vs Pixel-Level**: Spatial models require dense supervision; pixel-level models suit sparse data
+- **Supervision Pattern Matching**: Architecture must match supervision density pattern
+- **Ensemble Limitations**: Cannot compensate for fundamentally poor component models
+- **Cross-Region Challenges**: Spatial models show poor generalization with sparse supervision
+
+#### 📁 **Completed Implementation Files**
+```
+Scenario 2A Files (Complete but Failed):
+├── models/ensemble_mlp.py                              # Ensemble MLP architecture
+├── train_ensemble_mlp.py                               # Ensemble training pipeline
+├── predict_ensemble.py                                 # Ensemble prediction pipeline
+├── evaluate_ensemble_cross_region.py                   # Ensemble evaluation
+├── sbatch/train_ensemble_scenario2.sh                  # Ensemble training job
+├── sbatch/predict_ensemble_cross_region.sh             # Cross-region prediction job
+├── sbatch/evaluate_ensemble_when_ready.sh              # Ensemble evaluation job
+├── chm_outputs/scenario2_ensemble_mlp/                 # Ensemble model results
+├── chm_outputs/scenario2_cross_region_predictions/     # Cross-region predictions
+└── chm_outputs/scenario2_evaluation/                   # Evaluation results
+```
+
+#### 🔄 **Lessons for Scenario 2B**
+1. **Pixel-Level Approach**: Use MLP for GEDI training instead of spatial U-Net
+2. **Supervision Matching**: Match model architecture to supervision pattern
+3. **Dual-MLP Ensemble**: Combine two high-quality MLPs instead of MLP + poor U-Net
+4. **Expected Improvement**: GEDI MLP should achieve R² > 0.3 vs 0.16 for spatial U-Net
+
+### 🚀 **NEXT STEPS: SCENARIO 2B IMPLEMENTATION**
+
+Based on Scenario 2A failure analysis, Scenario 2B proposes:
+
+#### **Key Innovation**: Pixel-Level GEDI Training
+- **GEDI Model**: Train MLP on sparse GEDI rh data (same architecture as reference MLP)
+- **Ensemble**: Combine GEDI MLP + Reference MLP (dual-MLP ensemble)
+- **Expected Performance**: R² > 0.3 for GEDI MLP, R² > 0.5 for ensemble
+- **Advantage**: Both models use proven architecture but different supervision sources
+
+#### **Implementation Priority**
+1. **Modify `train_production_mlp.py`** to support `--supervision-mode gedi_only`
+2. **Extract GEDI pixels** from enhanced patches for training
+3. **Train dual-MLP ensemble** combining GEDI MLP + Reference MLP
+4. **Evaluate cross-region performance** with CRS-aware evaluation
+
+This failure provided valuable insights for developing more effective ensemble approaches in future scenarios.
