@@ -41,8 +41,9 @@ def setup_logging(output_dir):
 class EnsemblePredictor:
     """Ensemble prediction using trained GEDI and MLP models"""
     
-    def __init__(self, ensemble_model_path, gedi_model_path, mlp_model_path, device='cuda'):
+    def __init__(self, ensemble_model_path, gedi_model_path, mlp_model_path, device='cuda', gedi_model_type='unet'):
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+        self.gedi_model_type = gedi_model_type
         
         # Load ensemble model
         self.ensemble_model = self._load_ensemble_model(ensemble_model_path)
@@ -69,27 +70,22 @@ class EnsemblePredictor:
         
     def _load_gedi_model(self, model_path):
         """Load GEDI shift-aware U-Net model"""
-        # Use 30 satellite features (hardcoded for U-Net compatibility)
-        # Note: U-Net architecture expects fixed input channels
-        model = ShiftAwareUNet(in_channels=30).to(self.device)
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
-        
-        # Handle different checkpoint formats
-        if 'model_state_dict' in checkpoint:
-            # Checkpoint format with model_state_dict key
-            model.load_state_dict(checkpoint['model_state_dict'])
-        elif isinstance(checkpoint, dict) and 'enc1.0.weight' in checkpoint:
-            # Direct state_dict format for U-Net
-            model.load_state_dict(checkpoint)
-        elif isinstance(checkpoint, dict) and 'layers.0.weight' in checkpoint:
-            # This is an MLP model, not U-Net - for Scenario 2B
-            print("⚠️  Warning: Loading MLP model instead of U-Net. This might be for Scenario 2B.")
-            # Import MLP class and load as MLP
+
+        if self.gedi_model_type == 'unet':
+            # U-Net architecture expects fixed input channels
+            model = ShiftAwareUNet(in_channels=30).to(self.device)
+            if 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                model.load_state_dict(checkpoint)
+        elif self.gedi_model_type == 'mlp':
             sys.path.append('.')
             from train_production_mlp import AdvancedReferenceHeightMLP
+            input_dim = np.sum(checkpoint['selected_features']) if 'selected_features' in checkpoint else 30
             model = AdvancedReferenceHeightMLP(
-                input_dim=30,
-                hidden_dims=[256, 128, 64],
+                input_dim=input_dim,
+                hidden_dims=[1024, 512, 256, 128, 64],
                 dropout_rate=0.3,
                 use_residuals=False
             ).to(self.device)
@@ -97,14 +93,10 @@ class EnsemblePredictor:
                 model.load_state_dict(checkpoint['model_state_dict'])
             else:
                 model.load_state_dict(checkpoint)
+            self.gedi_scaler = checkpoint.get('scaler')
+            self.gedi_feature_selector = checkpoint.get('selected_features')
         else:
-            # Try to load as direct state_dict
-            try:
-                model.load_state_dict(checkpoint)
-            except Exception as e:
-                print(f"⚠️  Error loading GEDI model: {e}")
-                print(f"Available keys: {list(checkpoint.keys()) if isinstance(checkpoint, dict) else 'Not a dict'}")
-                raise
+            raise ValueError(f"Unknown GEDI model type: {self.gedi_model_type}")
         
         model.eval()
         return model
@@ -118,8 +110,9 @@ class EnsemblePredictor:
         from train_production_mlp import AdvancedReferenceHeightMLP
         
         # Create production MLP with matching architecture
+        input_dim = np.sum(checkpoint['selected_features']) if 'selected_features' in checkpoint else 30
         model = AdvancedReferenceHeightMLP(
-            input_dim=30,
+            input_dim=input_dim,
             hidden_dims=[1024, 512, 256, 128, 64],
             dropout_rate=0.4,
             use_residuals=True
@@ -151,7 +144,13 @@ class EnsemblePredictor:
         # Note: This function receives patch_data directly, so we use legacy indexing
         # Band utilities are used in the calling function (predict_region)
         satellite_features = patch_data[:30].astype(np.float32)
+
+        if satellite_features.shape[0] != 30 or satellite_features.shape[1] != 256 or satellite_features.shape[2] != 256:
+            print(f"⚠️  Unexpected satellite_features shape: {satellite_features.shape}. Skipping patch.")
+            return np.zeros((256, 256)) # Return empty prediction for this patch
         
+        h, w = satellite_features.shape[1], satellite_features.shape[2]
+
         # Handle NaN values (same as training)
         for band_idx in range(30):
             band_data = satellite_features[band_idx]
@@ -164,12 +163,30 @@ class EnsemblePredictor:
                 satellite_features[band_idx] = np.nan_to_num(band_data, nan=replacement_value)
         
         # Generate GEDI predictions (full patch)
-        patch_tensor = torch.FloatTensor(satellite_features).unsqueeze(0).to(self.device)
-        with torch.no_grad():
-            gedi_pred_patch = self.gedi_model(patch_tensor).squeeze().cpu().numpy()
+        if self.gedi_model_type == 'mlp':
+            # For MLP GEDI, process pixel-wise
+            gedi_predictions_pixels = np.zeros((h, w))
+            for i in range(0, h, 64):
+                for j in range(0, w, 64):
+                    end_i = min(i + 64, h)
+                    end_j = min(j + 64, w)
+                    block_features = satellite_features[:, i:end_i, j:end_j]
+                    pixel_features_gedi = block_features.reshape(30, -1).T
+                    if self.gedi_scaler is not None:
+                        pixel_features_gedi = self.gedi_scaler.transform(pixel_features_gedi)
+                    if self.gedi_feature_selector is not None:
+                        pixel_features_gedi = pixel_features_gedi[:, self.gedi_feature_selector]
+                    with torch.no_grad():
+                        gedi_tensor = torch.FloatTensor(pixel_features_gedi).to(self.device)
+                        gedi_block_pred = self.gedi_model(gedi_tensor).cpu().numpy().flatten()
+                    gedi_predictions_pixels[i:end_i, j:end_j] = gedi_block_pred.reshape(end_i - i, end_j - j)
+            gedi_pred_patch = gedi_predictions_pixels
+        else: # UNet GEDI
+            patch_tensor = torch.FloatTensor(satellite_features).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                gedi_pred_patch = self.gedi_model(patch_tensor).squeeze().cpu().numpy()
         
         # Generate MLP predictions (pixel-wise)
-        h, w = satellite_features.shape[1], satellite_features.shape[2]
         mlp_predictions = np.zeros((h, w))
         
         # Process in chunks for memory efficiency
@@ -309,6 +326,7 @@ def main():
     parser.add_argument('--patch-dir', required=True, help='Directory containing patch files')
     parser.add_argument('--output-dir', required=True, help='Directory to save predictions')
     parser.add_argument('--device', default='cuda', choices=['cuda', 'cpu'], help='Device to use')
+    parser.add_argument('--gedi-model-type', default='unet', choices=['unet', 'mlp'], help='Type of GEDI model (unet or mlp)')
     
     args = parser.parse_args()
     
@@ -323,11 +341,12 @@ def main():
     
     # Initialize predictor
     predictor = EnsemblePredictor(
-        ensemble_model_path=args.ensemble_model,
-        gedi_model_path=args.gedi_model,
-        mlp_model_path=args.mlp_model,
-        device=args.device
-    )
+            ensemble_model_path=args.ensemble_model,
+            gedi_model_path=args.gedi_model,
+            mlp_model_path=args.mlp_model,
+            device=args.device,
+            gedi_model_type=args.gedi_model_type
+        )
     
     # Region-specific configurations
     region_configs = {

@@ -206,7 +206,7 @@ python predict_ensemble.py \
   --output-dir chm_outputs/scenario2_kochi_predictions
 ```
 
-### Scenario 2B Implementation: Pixel-Level GEDI Training (Sparse GEDI rh Supervision) - 🔄 PROPOSED
+### Scenario 2B Implementation: Pixel-Level GEDI Training (Sparse GEDI rh Supervision) - ❌ FAILED
 
 #### S2B.1 GEDI Pixel-Level MLP Training
 **Train MLP on pixels with GEDI rh data (similar to reference MLP approach)**
@@ -272,11 +272,11 @@ python predict_ensemble.py \
   --output-dir chm_outputs/scenario2b_kochi_predictions
 ```
 
-**Expected Performance**:
-- **GEDI MLP**: R² > 0.3 (better than spatial U-Net due to pixel-level approach)
-- **Ensemble**: R² > 0.5 (improvement over single models)
-- **Rationale**: Both MLPs use same architecture but different supervision sources
-- **Advantage**: Combines GEDI geolocation patterns with reference height precision
+**ACTUAL PERFORMANCE**:
+- **GEDI MLP**: Failed to produce meaningful predictions
+- **Ensemble**: Kochi R² = -5.14, Tochigi R² = -9.95 (worse than Scenario 1)
+- **Root Cause**: Sparse GEDI supervision insufficient even with pixel-level approach
+- **Conclusion**: Both spatial (2A) and pixel-level (2B) GEDI approaches fail
 
 ### Scenario 3 Implementation: Reference + GEDI Training + Target Adaptation
 

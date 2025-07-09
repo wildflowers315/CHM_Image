@@ -16,10 +16,10 @@ import rasterio
 from pathlib import Path
 import glob
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, QuantileTransformer
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 import json
-import pickle
+import pickle as _pickle
 from tqdm import tqdm
 from datetime import datetime
 import logging
@@ -38,7 +38,7 @@ class EnsembleDataset(Dataset):
     
     def __init__(self, patch_dir: str, gedi_model_path: str, mlp_model_path: str, 
                  reference_tif_path: str, patch_pattern: str = "*05LE4*",
-                 max_samples_per_patch: int = 50000):
+                 max_samples_per_patch: int = 50000, gedi_model_type: str = 'unet'):
         
         self.patch_dir = Path(patch_dir)
         self.gedi_model_path = gedi_model_path
@@ -46,10 +46,11 @@ class EnsembleDataset(Dataset):
         self.reference_tif_path = reference_tif_path
         self.patch_pattern = patch_pattern
         self.max_samples_per_patch = max_samples_per_patch
+        self.gedi_model_type = gedi_model_type
         
         # Load models
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.gedi_model, self.gedi_scaler = self._load_gedi_model()
+        self.gedi_model, self.gedi_scaler, self.gedi_feature_selector = self._load_gedi_model()
         self.mlp_model, self.mlp_scaler, self.mlp_feature_selector = self._load_mlp_model()
         
         # Find patches and load data
@@ -66,65 +67,51 @@ class EnsembleDataset(Dataset):
         files = glob.glob(pattern)
         return sorted(files)
     
-    def _load_gedi_model(self):
-        """Load trained GEDI model"""
-        print(f"Loading GEDI model from: {self.gedi_model_path}")
+    def _load_model(self, model_path, model_name, model_type):
+        """Load a trained model."""
+        print(f"Loading {model_name} model ({model_type}) from: {model_path}")
         
-        if not os.path.exists(self.gedi_model_path):
-            raise FileNotFoundError(f"GEDI model not found: {self.gedi_model_path}")
-        
-        # Load checkpoint
-        checkpoint = torch.load(self.gedi_model_path, map_location=self.device, weights_only=False)
-        
-        # Load shift-aware U-Net model
-        from models.trainers.shift_aware_trainer import ShiftAwareUNet
-        
-        # Create shift-aware U-Net
-        model = ShiftAwareUNet(in_channels=30).to(self.device)
-        model.load_state_dict(checkpoint)
-        model.eval()
-        
-        scaler = None  # Shift-aware U-Net handles its own normalization
-        
-        print(f"✅ GEDI shift-aware U-Net loaded successfully (30 input channels)")
-        return model, scaler
-    
-    def _load_mlp_model(self):
-        """Load production MLP model"""
-        print(f"Loading production MLP from: {self.mlp_model_path}")
-        
-        if not os.path.exists(self.mlp_model_path):
-            raise FileNotFoundError(f"MLP model not found: {self.mlp_model_path}")
-        
-        # Load checkpoint with adaptive device mapping (CPU/GPU compatible)
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"{model_name} model not found: {model_path}")
+
         try:
-            # Try loading to target device first
-            checkpoint = torch.load(self.mlp_model_path, map_location=self.device, weights_only=False)
-        except RuntimeError as e:
-            if "CUDA" in str(e) and not torch.cuda.is_available():
-                # Fallback to CPU if CUDA model but no GPU available
-                print(f"⚠️  CUDA model detected but no GPU available, loading to CPU...")
-                checkpoint = torch.load(self.mlp_model_path, map_location='cpu', weights_only=False)
-            else:
-                raise e
-        
-        # Create model (advanced MLP)
-        from train_production_mlp import AdvancedReferenceHeightMLP
-        input_dim = checkpoint.get('input_features', 30)
-        model = AdvancedReferenceHeightMLP(
-            input_dim=input_dim,
-            hidden_dims=[1024, 512, 256, 128, 64],
-            dropout_rate=0.4
-        ).to(self.device)
-        
-        model.load_state_dict(checkpoint['model_state_dict'])
+            # Default to weights_only=True for security
+            checkpoint = torch.load(model_path, map_location=self.device, weights_only=True)
+        except _pickle.UnpicklingError:
+            # If it fails, it might be due to the QuantileTransformer
+            print("⚠️ Weights-only load failed. Falling back to legacy loading.")
+            print("   This is likely due to a pickled scikit-learn object.")
+            print("   Only proceed if you trust the source of this checkpoint.")
+            
+            # Allow the specific QuantileTransformer global
+            torch.serialization.add_safe_globals([QuantileTransformer])
+            checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+
+        if model_type == 'mlp':
+            from train_production_mlp import AdvancedReferenceHeightMLP
+            input_dim = checkpoint.get('input_features', np.sum(checkpoint['selected_features']))
+            model = AdvancedReferenceHeightMLP(input_dim=input_dim).to(self.device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            scaler = checkpoint.get('scaler')
+            feature_selector = checkpoint.get('selected_features')
+        elif model_type == 'unet':
+            from models.trainers.shift_aware_trainer import ShiftAwareUNet
+            model = ShiftAwareUNet(in_channels=30).to(self.device)
+            model.load_state_dict(checkpoint)
+            scaler = None
+            feature_selector = None
+        else:
+            raise ValueError(f"Unknown model type: {model_type}")
+
         model.eval()
-        
-        scaler = checkpoint.get('scaler')
-        feature_selector = checkpoint.get('selected_features')
-        
-        print(f"✅ Production MLP loaded successfully (input_dim: {input_dim})")
+        print(f"✅ {model_name} model loaded successfully.")
         return model, scaler, feature_selector
+
+    def _load_gedi_model(self):
+        return self._load_model(self.gedi_model_path, "GEDI", self.gedi_model_type)
+
+    def _load_mlp_model(self):
+        return self._load_model(self.mlp_model_path, "MLP", 'mlp')
     
     def _generate_training_data(self):
         """Generate ensemble training data by running both models on patches"""
@@ -135,90 +122,52 @@ class EnsembleDataset(Dataset):
         
         for patch_file in tqdm(self.patch_files, desc="Generating ensemble data"):
             try:
-                # Check patch compatibility first
                 if not check_patch_compatibility(patch_file, "reference"):
                     continue
                 
-                # Extract bands using robust utilities
-                try:
-                    satellite_features, reference_band = extract_bands_by_name(patch_file, supervision_mode="reference")
-                    satellite_features = satellite_features.astype(np.float32)
-                    
-                    # Get GEDI band separately
-                    gedi_band_idx = find_band_by_name(patch_file, "rh")
-                    if gedi_band_idx is None:
-                        continue  # Skip patches without GEDI data
-                    
-                    with rasterio.open(patch_file) as src:
-                        patch_data = src.read()
-                        gedi_band = patch_data[gedi_band_idx]
-                        
-                except Exception as e:
-                    # Fallback to legacy method
-                    with rasterio.open(patch_file) as src:
-                        patch_data = src.read()
-                    
-                    if patch_data.shape[0] < 32:  # Need satellite + GEDI + reference
-                        continue
-                    
-                    satellite_features = patch_data[:30].astype(np.float32)
-                    gedi_band = patch_data[30]  # GEDI supervision
-                    reference_band = patch_data[31]  # Reference height target
+                satellite_features, reference_band = extract_bands_by_name(patch_file, supervision_mode="reference")
+                satellite_features = np.nan_to_num(satellite_features.astype(np.float32))
                 
-                # Handle NaN values in satellite features (same as GEDI training)
-                for band_idx in range(30):
-                    band_data = satellite_features[band_idx]
-                    if np.isnan(band_data).any():
-                        if band_idx in [23, 24]:  # GLO30 slope/aspect
-                            replacement_value = 0.0
-                        else:
-                            valid_pixels = band_data[~np.isnan(band_data)]
-                            replacement_value = np.median(valid_pixels) if len(valid_pixels) > 0 else 0.0
-                        satellite_features[band_idx] = np.nan_to_num(band_data, nan=replacement_value)
-                
-                # Find valid reference pixels (our ensemble targets)
                 valid_ref_mask = (~np.isnan(reference_band)) & (reference_band > 0) & (reference_band <= 100)
                 
-                if np.sum(valid_ref_mask) < 10:  # Need minimum reference samples
+                if np.sum(valid_ref_mask) < 10:
                     continue
                 
-                # Get coordinates of valid reference pixels
                 ref_y, ref_x = np.where(valid_ref_mask)
                 
-                # Limit samples per patch
                 if len(ref_y) > self.max_samples_per_patch:
                     indices = np.random.choice(len(ref_y), self.max_samples_per_patch, replace=False)
                     ref_y, ref_x = ref_y[indices], ref_x[indices]
                 
-                # Extract satellite features at reference locations
-                pixel_features = satellite_features[:, ref_y, ref_x].T  # (n_pixels, 30)
+                pixel_features = satellite_features[:, ref_y, ref_x].T
                 reference_targets = reference_band[ref_y, ref_x]
                 
-                # Generate GEDI predictions on full patch (image-level prediction)
-                patch_tensor = torch.FloatTensor(satellite_features).unsqueeze(0).to(self.device)  # Add batch dim
                 with torch.no_grad():
-                    gedi_patch_pred = self.gedi_model(patch_tensor).squeeze().cpu().numpy()  # Remove batch dim
-                
-                # Extract GEDI predictions at reference pixel locations
-                gedi_preds = gedi_patch_pred[ref_y, ref_x]
-                
-                # Generate MLP predictions
-                mlp_features = pixel_features.copy()
-                if self.mlp_scaler is not None:
-                    mlp_features = self.mlp_scaler.transform(mlp_features)
-                if self.mlp_feature_selector is not None:
-                    mlp_features = mlp_features[:, self.mlp_feature_selector]
-                
-                with torch.no_grad():
+                    if self.gedi_model_type == 'unet':
+                        patch_tensor = torch.FloatTensor(satellite_features).unsqueeze(0).to(self.device)
+                        gedi_patch_pred = self.gedi_model(patch_tensor).squeeze().cpu().numpy()
+                        gedi_preds = gedi_patch_pred[ref_y, ref_x]
+                    else: # mlp
+                        gedi_features = pixel_features.copy()
+                        if self.gedi_scaler:
+                            gedi_features = self.gedi_scaler.transform(gedi_features)
+                        if self.gedi_feature_selector is not None:
+                            gedi_features = gedi_features[:, self.gedi_feature_selector]
+                        gedi_tensor = torch.FloatTensor(gedi_features).to(self.device)
+                        gedi_preds = self.gedi_model(gedi_tensor).cpu().numpy()
+
+                    mlp_features = pixel_features.copy()
+                    if self.mlp_scaler:
+                        mlp_features = self.mlp_scaler.transform(mlp_features)
+                    if self.mlp_feature_selector is not None:
+                        mlp_features = mlp_features[:, self.mlp_feature_selector]
+                    
                     mlp_tensor = torch.FloatTensor(mlp_features).to(self.device)
                     mlp_preds = self.mlp_model(mlp_tensor).cpu().numpy()
                 
-                # Store results
                 all_gedi_preds.extend(gedi_preds)
                 all_mlp_preds.extend(mlp_preds)
                 all_targets.extend(reference_targets)
-                
-                print(f"  {os.path.basename(patch_file)}: {len(reference_targets)} ensemble samples")
                 
             except Exception as e:
                 print(f"❌ Error processing {patch_file}: {e}")
@@ -354,6 +303,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
     parser.add_argument('--batch-size', type=int, default=1024, help='Batch size')
     parser.add_argument('--learning-rate', type=float, default=0.001, help='Learning rate')
+    parser.add_argument('--gedi-model-type', default='unet', choices=['unet', 'mlp'], help='Type of GEDI model (unet or mlp)')
     parser.add_argument('--model-type', default='simple', choices=['simple', 'advanced', 'adaptive'],
                        help='Type of ensemble model')
     
@@ -377,7 +327,8 @@ def main():
             gedi_model_path=args.gedi_model_path,
             mlp_model_path=args.reference_model_path,
             reference_tif_path=args.reference_height_path,
-            patch_pattern=args.patch_pattern
+            patch_pattern=args.patch_pattern,
+            gedi_model_type=args.gedi_model_type
         )
         
         # Create ensemble model
