@@ -53,29 +53,59 @@ Following the proven methodology from `docs/reference_height_training_plan.md`, 
 - **Validation**: Direct cross-region application to Kochi (04hf3) and Tochigi (09gd4)
 - **Key Question**: Does Google Embedding v1 outperform original 30-band satellite data?
 
-### **Scenario 2: Google Embedding + GEDI Ensemble Training**
-**Objective**: Evaluate ensemble combining Google Embedding reference training with GEDI supervision
+### **Scenario 2A: Google Embedding + GEDI Spatial U-Net Ensemble**
+**Objective**: Evaluate ensemble combining Google Embedding reference training with GEDI spatial U-Net (following original satellite 2A approach)
 - **Component Models**: 
-  - **GEDI Model**: MLP trained on sparse GEDI rh data using 64 embedding bands
+  - **GEDI Model**: Spatial U-Net with shift-aware loss trained on sparse GEDI rh data using 64 embedding bands
   - **Reference Model**: MLP trained on reference height TIF using 64 embedding bands
 - **Ensemble Architecture**: MLP combining both model outputs (same as existing `ensemble_mlp.py`)
 - **Training Data**: Hyogo patches with both reference height TIF and GEDI supervision
 - **Validation**: Direct cross-region application (no fine-tuning)
-- **Key Question**: Does GEDI supervision enhance Google Embedding generalization?
+- **Key Question**: Can spatial U-Net with Google Embedding succeed where original satellite U-Net failed?
+
+#### **🔍 Learning from Original Satellite 2A Failure**
+The original 30-band satellite Scenario 2A failed with:
+- **Training R²**: 0.1611 (GEDI ignored: weight -0.0013, MLP: 0.7512)
+- **Cross-Region**: Kochi R² = -8.58, Tochigi R² = -7.95 (200x worse than MLP)
+- **Root Cause**: Spatial U-Net incompatible with sparse GEDI supervision
+
+**Google Embedding Hypothesis**: The 64-band embedding may provide richer spatial context that enables U-Net to better handle sparse GEDI supervision through improved feature representation.
+
+### **Scenario 2B: Google Embedding + GEDI Pixel-Level MLP Ensemble**
+**Objective**: Evaluate ensemble combining Google Embedding reference training with GEDI pixel-level MLP (following original satellite 2B approach)
+- **Component Models**: 
+  - **GEDI Model**: MLP trained on sparse GEDI rh data using 64 embedding bands (pixel-level approach)
+  - **Reference Model**: MLP trained on reference height TIF using 64 embedding bands
+- **Ensemble Architecture**: MLP combining both model outputs (dual-MLP ensemble)
+- **Training Data**: Hyogo patches with both reference height TIF and GEDI supervision
+- **Validation**: Direct cross-region application (no fine-tuning)
+- **Key Question**: Can pixel-level GEDI MLP with Google Embedding succeed where original satellite MLP failed?
+
+#### **🔍 Learning from Original Satellite 2B Failure**
+The original 30-band satellite Scenario 2B failed with:
+- **Cross-Region**: Kochi R² = -5.14, Tochigi R² = -9.95 (worse than Scenario 1)
+- **Root Cause**: Sparse GEDI supervision insufficient even with pixel-level approach
+
+**Google Embedding Hypothesis**: The 64-band embedding may provide more robust pixel-level features that enable effective GEDI MLP training despite supervision sparsity, leading to successful dual-MLP ensemble performance.
 
 ## Performance Comparison Framework
 
 ### **Baseline Comparison with Existing 30-Band MLP Results**
-Based on `docs/reference_height_training_plan.md`, we will compare against the **Production MLP** results:
+Based on `docs/reference_height_training_plan.md`, we will compare against both the **Production MLP** and **Ensemble MLP** results:
 
-| Approach | Input Features | Training R² | Cross-Region R² | Prediction Path |
-|----------|---------------|-------------|-----------------|------------------|
-| **Original Satellite MLP** | 30 bands | 0.5026 | +0.012 (bias-corrected) | `chm_outputs/cross_region_predictions/` |
-| **Google Embedding Scenario 1** | 64 bands | R² > 0.5026 | Expected > 0.012 | `chm_outputs/google_embedding_scenario1_predictions/` |
-| **Google Embedding Scenario 2** | 64 bands × 2 models | R² > 0.5500 | Expected > 0.3 | `chm_outputs/google_embedding_scenario2_predictions/` |
+| Approach | Input Features | Training R² | Cross-Region R² | Status | Prediction Path |
+|----------|---------------|-------------|-----------------|--------|------------------|
+| **Original Satellite MLP** | 30 bands | 0.5026 | +0.012 (bias-corrected) | ✅ Production Ready | `chm_outputs/cross_region_predictions/` |
+| **Original Satellite Ensemble (2A)** | 30 bands × 2 models | 0.1611 | -8.58 to -7.95 | ❌ Failed | `chm_outputs/scenario2_cross_region_predictions/` |
+| **Original Satellite Ensemble (2B)** | 30 bands × 2 models | N/A | -5.14 to -9.95 | ❌ Failed | `chm_outputs/scenario2b_cross_region_predictions/` |
+| **Google Embedding Scenario 1** | 64 bands | R² > 0.5026 | Expected > 0.012 | 🔄 Planned | `chm_outputs/google_embedding_scenario1_predictions/` |
+| **Google Embedding Scenario 2A** | 64 bands × 2 models (U-Net+MLP) | R² > 0.5500 | Expected > 0.3 | 🔄 Planned | `chm_outputs/google_embedding_scenario2a_predictions/` |
+| **Google Embedding Scenario 2B** | 64 bands × 2 models (MLP+MLP) | R² > 0.5500 | Expected > 0.3 | 🔄 Planned | `chm_outputs/google_embedding_scenario2b_predictions/` |
 
-### **Existing 30-Band MLP Results (Production Ready)**
+### **Existing 30-Band MLP Results (Production Ready vs Failed Ensembles)**
 From `reference_height_training_plan.md`:
+
+#### **✅ Production MLP (Scenario 1 - Reference-Only)**
 - **Model**: `chm_outputs/production_mlp_best.pth` (R² = 0.5026)
 - **Architecture**: AdvancedReferenceHeightMLP with 30 satellite features
 - **Cross-Region Predictions**: 
@@ -84,6 +114,21 @@ From `reference_height_training_plan.md`:
   - Hyogo: `chm_outputs/cross_region_predictions/05LE4_hyogo/*_mlp_prediction.tif`
 - **Performance**: 161 patches, 10.55M pixels, 100% success rate
 - **Bias Correction**: Region-specific factors (Kochi: 2.5x, Tochigi: 3.7x)
+
+#### **❌ Failed Ensemble Approaches (Scenario 2A & 2B)**
+- **Scenario 2A**: GEDI Spatial U-Net + Reference MLP Ensemble
+  - **Training R²**: 0.1611 (GEDI ignored: weight -0.0013, MLP: 0.7512)
+  - **Cross-Region**: Kochi R² = -8.58, Tochigi R² = -7.95 (200x worse than MLP)
+  - **Root Cause**: Spatial U-Net incompatible with sparse GEDI supervision
+- **Scenario 2B**: GEDI Pixel-Level MLP + Reference MLP Ensemble  
+  - **Cross-Region**: Kochi R² = -5.14, Tochigi R² = -9.95 (worse than Scenario 1)
+  - **Root Cause**: Sparse GEDI supervision insufficient even with pixel-level approach
+
+#### **🔍 Key Insights for Google Embedding Scenario 2**
+- **Ensemble Challenge**: Both 30-band satellite ensemble approaches failed
+- **GEDI Supervision Limitation**: Sparse GEDI data (<0.3% coverage) problematic for both spatial and pixel-level models
+- **Google Embedding Opportunity**: 64-band embedding may provide richer features to overcome GEDI sparsity
+- **Architecture Consideration**: Pixel-level MLP ensemble preferred over spatial U-Net ensemble
 
 ### **Cross-Region Evaluation**
 - **Training Region**: Hyogo (05LE4) - 63 patches with Google Embedding data
@@ -198,11 +243,41 @@ python train_production_mlp.py \
   --learning-rate 0.001
 ```
 
-### **Scenario 2: Google Embedding + GEDI Ensemble Training**
-Following the existing ensemble training approach:
+### **Scenario 2A: Google Embedding + GEDI Spatial U-Net Ensemble Training**
+Following the original satellite 2A approach with spatial U-Net:
 
 ```bash
-# Step 1: Train GEDI MLP using Google Embedding
+# Step 1: Train GEDI Spatial U-Net using Google Embedding
+python train_predict_map.py \
+  --patch-dir chm_outputs/ \
+  --patch-pattern "*05LE4*embedding*" \
+  --model shift_aware_unet \
+  --shift-radius 2 \
+  --supervision-mode gedi_only \
+  --input-bands 64 \
+  --band-selection embedding \
+  --output-dir chm_outputs/google_embedding_gedi_unet/ \
+  --epochs 100 \
+  --batch-size 4 \
+  --learning-rate 0.0001
+
+# Step 2: Train Ensemble combining GEDI U-Net + Reference MLP
+python train_ensemble_mlp.py \
+  --gedi-model-path chm_outputs/google_embedding_gedi_unet/best_model.pth \
+  --reference-model-path chm_outputs/google_embedding_scenario1/best_model.pth \
+  --patch-dir chm_outputs/ \
+  --patch-pattern "*05LE4*embedding*" \
+  --reference-height-path downloads/dchm_05LE4.tif \
+  --output-dir chm_outputs/google_embedding_ensemble_2a/ \
+  --epochs 100 \
+  --learning-rate 0.001
+```
+
+### **Scenario 2B: Google Embedding + GEDI Pixel-Level MLP Ensemble Training**
+Following the original satellite 2B approach with pixel-level MLP:
+
+```bash
+# Step 1: Train GEDI Pixel-Level MLP using Google Embedding
 python train_production_mlp.py \
   --patch-dir chm_outputs/ \
   --patch-pattern "*05LE4*embedding*" \
@@ -214,14 +289,14 @@ python train_production_mlp.py \
   --batch-size 32 \
   --learning-rate 0.001
 
-# Step 2: Train Ensemble combining both models
+# Step 2: Train Dual-MLP Ensemble combining both MLPs
 python train_ensemble_mlp.py \
   --gedi-model-path chm_outputs/google_embedding_gedi_mlp/best_model.pth \
   --reference-model-path chm_outputs/google_embedding_scenario1/best_model.pth \
   --patch-dir chm_outputs/ \
   --patch-pattern "*05LE4*embedding*" \
   --reference-height-path downloads/dchm_05LE4.tif \
-  --output-dir chm_outputs/google_embedding_ensemble/ \
+  --output-dir chm_outputs/google_embedding_ensemble_2b/ \
   --epochs 100 \
   --learning-rate 0.001
 ```
@@ -238,25 +313,36 @@ python predict_mlp_cross_region.py \
   --band-selection embedding \
   --output-dir chm_outputs/google_embedding_scenario1_predictions/
 
-# Scenario 2: Google Embedding Ensemble Predictions
+# Scenario 2A: Google Embedding Spatial U-Net Ensemble Predictions
 python predict_ensemble.py \
-  --gedi-model chm_outputs/google_embedding_gedi_mlp/best_model.pth \
+  --gedi-model chm_outputs/google_embedding_gedi_unet/best_model.pth \
   --reference-model chm_outputs/google_embedding_scenario1/best_model.pth \
-  --ensemble-mlp chm_outputs/google_embedding_ensemble/best_model.pth \
+  --ensemble-mlp chm_outputs/google_embedding_ensemble_2a/best_model.pth \
   --patch-dir chm_outputs/ \
   --regions "04hf3,09gd4" \
   --band-selection embedding \
-  --output-dir chm_outputs/google_embedding_scenario2_predictions/
+  --output-dir chm_outputs/google_embedding_scenario2a_predictions/
+
+# Scenario 2B: Google Embedding Dual-MLP Ensemble Predictions
+python predict_ensemble.py \
+  --gedi-model chm_outputs/google_embedding_gedi_mlp/best_model.pth \
+  --reference-model chm_outputs/google_embedding_scenario1/best_model.pth \
+  --ensemble-mlp chm_outputs/google_embedding_ensemble_2b/best_model.pth \
+  --patch-dir chm_outputs/ \
+  --regions "04hf3,09gd4" \
+  --band-selection embedding \
+  --output-dir chm_outputs/google_embedding_scenario2b_predictions/
 ```
 
 ### **Evaluation and Comparison Scripts**
 Using existing evaluation framework:
 
 ```bash
-# Evaluate both scenarios with bias correction
+# Evaluate all scenarios with bias correction
 python evaluate_with_bias_correction.py \
   --scenario1-results chm_outputs/google_embedding_scenario1_predictions/ \
-  --scenario2-results chm_outputs/google_embedding_scenario2_predictions/ \
+  --scenario2a-results chm_outputs/google_embedding_scenario2a_predictions/ \
+  --scenario2b-results chm_outputs/google_embedding_scenario2b_predictions/ \
   --original-results chm_outputs/production_mlp_results/ \
   --output-dir chm_outputs/google_embedding_evaluation/
 
@@ -439,9 +525,16 @@ def create_comprehensive_model_visualizations():
         data_type="embedding"
     )
     
-    embedding_scenario2_results = analyzer.analyze_model_predictions(
-        "Google Embedding Scenario 2", 
-        "chm_outputs/google_embedding_scenario2_predictions",
+    embedding_scenario2a_results = analyzer.analyze_model_predictions(
+        "Google Embedding Scenario 2A", 
+        "chm_outputs/google_embedding_scenario2a_predictions",
+        ['dchm_04hf3', 'dchm_05LE4', 'dchm_09gd4'],
+        data_type="embedding"
+    )
+    
+    embedding_scenario2b_results = analyzer.analyze_model_predictions(
+        "Google Embedding Scenario 2B", 
+        "chm_outputs/google_embedding_scenario2b_predictions",
         ['dchm_04hf3', 'dchm_05LE4', 'dchm_09gd4'],
         data_type="embedding"
     )
@@ -454,6 +547,21 @@ def create_comprehensive_model_visualizations():
         data_type="satellite"
     )
     
+    # Analyze Original Satellite Ensemble failures (for comparison)  
+    original_ensemble_2a_results = analyzer.analyze_model_predictions(
+        "Original Satellite Ensemble 2A (Failed)", 
+        "chm_outputs/scenario2_cross_region_predictions",  # Failed ensemble predictions
+        ['dchm_04hf3', 'dchm_05LE4', 'dchm_09gd4'],
+        data_type="satellite"
+    )
+    
+    original_ensemble_2b_results = analyzer.analyze_model_predictions(
+        "Original Satellite Ensemble 2B (Failed)", 
+        "chm_outputs/scenario2b_cross_region_predictions",  # Failed ensemble predictions
+        ['dchm_04hf3', 'dchm_05LE4', 'dchm_09gd4'],
+        data_type="satellite"
+    )
+    
     # Create aggregated correlation plots for Google Embedding
     analyzer.create_aggregated_correlation_plot(
         embedding_scenario1_results, 
@@ -462,9 +570,15 @@ def create_comprehensive_model_visualizations():
     )
     
     analyzer.create_aggregated_correlation_plot(
-        embedding_scenario2_results, 
-        "Google Embedding Scenario 2 (Reference + GEDI Ensemble)",
-        "chm_outputs/model_comparison_visualizations/google_embedding_scenario2_correlation.png"
+        embedding_scenario2a_results, 
+        "Google Embedding Scenario 2A (Reference + GEDI U-Net Ensemble)",
+        "chm_outputs/model_comparison_visualizations/google_embedding_scenario2a_correlation.png"
+    )
+    
+    analyzer.create_aggregated_correlation_plot(
+        embedding_scenario2b_results, 
+        "Google Embedding Scenario 2B (Reference + GEDI MLP Ensemble)",
+        "chm_outputs/model_comparison_visualizations/google_embedding_scenario2b_correlation.png"
     )
     
     # Create correlation plot for Original Satellite data
@@ -474,8 +588,22 @@ def create_comprehensive_model_visualizations():
         "chm_outputs/model_comparison_visualizations/original_satellite_correlation.png"
     )
     
-    # Create comprehensive comparison heatmap
-    all_results = embedding_scenario1_results + embedding_scenario2_results + original_satellite_results
+    # Create correlation plots for Original Satellite Ensemble failures (for comparison)
+    analyzer.create_aggregated_correlation_plot(
+        original_ensemble_2a_results, 
+        "Original Satellite Ensemble 2A (Failed)",
+        "chm_outputs/model_comparison_visualizations/original_ensemble_2a_correlation.png"
+    )
+    
+    analyzer.create_aggregated_correlation_plot(
+        original_ensemble_2b_results, 
+        "Original Satellite Ensemble 2B (Failed)",
+        "chm_outputs/model_comparison_visualizations/original_ensemble_2b_correlation.png"
+    )
+    
+    # Create comprehensive comparison heatmap including all approaches
+    all_results = (embedding_scenario1_results + embedding_scenario2a_results + embedding_scenario2b_results + 
+                  original_satellite_results + original_ensemble_2a_results + original_ensemble_2b_results)
     create_comprehensive_comparison_heatmap(all_results, 
         "chm_outputs/model_comparison_visualizations/comprehensive_comparison_heatmap.png")
 ```
@@ -573,8 +701,11 @@ def create_performance_comparison_table(all_results, output_file):
 ## Expected Outcomes
 
 ### **Performance Hypotheses**
-1. **Google Embedding Scenario 1**: R² > 0.5026 (improvement over original 30-band satellite data)
-2. **Google Embedding Scenario 2**: R² > 0.5500 (ensemble with GEDI provides additional signal)
+1. **Google Embedding Scenario 1**: R² > 0.5026 (improvement over original 30-band satellite MLP)
+2. **Google Embedding Scenario 2A**: R² > 0.5500 (spatial U-Net ensemble with GEDI provides additional signal)
+3. **Google Embedding Scenario 2B**: R² > 0.5500 (dual-MLP ensemble with GEDI provides additional signal)
+4. **Ensemble Redemption**: Google Embedding may succeed where original satellite ensemble failed due to richer feature representation
+5. **2A vs 2B Comparison**: Determine which ensemble approach (spatial vs pixel-level) works better with Google Embedding
 
 ### **Cross-Region Generalization**
 - **Kochi (04hf3)**: Expected R² > 0.4 with bias correction
@@ -612,10 +743,13 @@ Existing Code Usage:
 ```
 chm_outputs/
 ├── google_embedding_scenario1/         # Scenario 1: Reference-only results
-├── google_embedding_gedi_mlp/          # Scenario 2: GEDI MLP component
-├── google_embedding_ensemble/          # Scenario 2: Ensemble results
+├── google_embedding_gedi_unet/         # Scenario 2A: GEDI U-Net component
+├── google_embedding_gedi_mlp/          # Scenario 2B: GEDI MLP component
+├── google_embedding_ensemble_2a/       # Scenario 2A: U-Net+MLP ensemble results
+├── google_embedding_ensemble_2b/       # Scenario 2B: MLP+MLP ensemble results
 ├── google_embedding_scenario1_predictions/  # Scenario 1 cross-region predictions
-├── google_embedding_scenario2_predictions/  # Scenario 2 cross-region predictions
+├── google_embedding_scenario2a_predictions/ # Scenario 2A cross-region predictions
+├── google_embedding_scenario2b_predictions/ # Scenario 2B cross-region predictions
 ├── google_embedding_evaluation/        # Comprehensive evaluation
 ├── google_vs_original_comparison/      # Comparison analysis
 └── google_embedding_visualizations/    # Heatmaps and correlation plots
@@ -632,10 +766,11 @@ chm_outputs/
 - [ ] **Step 4**: Heatmap visualizations created for all comparisons
 
 ### **Performance Success**
-- [ ] **Step 1**: Google Embedding Only > Original Satellite Data (R² > 0.5026)
-- [ ] **Step 2**: Auxiliary Heights provide meaningful improvement (R² > 0.5500)
-- [ ] **Step 3**: Forest Mask enhances non-forest predictions (R² > 0.5200)
-- [ ] **Step 4**: Full Dataset achieves best performance (R² > 0.5800)
+- [ ] **Step 1**: Google Embedding Scenario 1 > Original Satellite MLP (R² > 0.5026)
+- [ ] **Step 2**: Google Embedding Scenario 2A > Original Satellite Ensemble 2A (R² > 0.0 vs R² -8.58 to -7.95)
+- [ ] **Step 3**: Google Embedding Scenario 2B > Original Satellite Ensemble 2B (R² > 0.0 vs R² -5.14 to -9.95)
+- [ ] **Step 4**: Ensemble Redemption: Successful GEDI integration using Google Embedding
+- [ ] **Step 5**: Determine optimal ensemble approach: 2A (spatial) vs 2B (pixel-level)
 
 ### **Scientific Success**
 - [ ] Quantified Google Embedding v1 effectiveness for canopy height prediction
