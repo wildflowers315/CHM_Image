@@ -46,6 +46,19 @@ source chm_env/bin/activate
 
 - You can use GPU under HPC environments for speed up training and prediction.
 
+## Data Input Options
+
+### Google Embedding v1 Support
+- **Google Embedding v1**: Annual satellite data embedding with 64 bands representing multi-modal data
+- **Data Source**: `GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL`
+- **Characteristics**: 
+  - 64 bands per year (Sentinel-1, Sentinel-2, DEM, ALOS2, GEDI, ERA5 climate, land cover)
+  - 10m resolution
+  - Value range: -1 to 1 (pre-normalized, no additional normalization required)
+  - Yearly product (no temporal dimension)
+- **Usage**: Use `--embedding-only` flag to process only Google Embedding data
+- **Implementation**: `get_google_embedding_data()` function in `chm_main.py`
+
 ## Project Completion Status
 
 ### ✅ **COMPLETED SCENARIOS**

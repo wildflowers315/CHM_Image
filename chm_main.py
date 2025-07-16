@@ -128,6 +128,9 @@ def parse_args():
                        help='Enable Paul\'s 2025 temporal compositing (12-monthly data for S1/S2/ALOS2)')
     parser.add_argument('--monthly-composite', type=str, default='median', choices=['median', 'mean'],
                        help='Monthly composite method for temporal mode')
+    # Google Embedding v1 support
+    parser.add_argument('--embedding-only', action='store_true',
+                       help='Use only Google Embedding v1 data (64 bands, yearly product, no temporal dimension)')
     # resample method
     parser.add_argument('--resample', type=str, default='bilinear', choices=['bilinear', 'bicubic'],
                        help='Resampling method for image export')
@@ -617,6 +620,37 @@ def get_temporal_sentinel2_data(aoi: ee.Geometry, year: int, clouds_th: float, c
     print(f"Created temporal S2 with {temporal_s2.bandNames().size().getInfo()} bands")
     return temporal_s2
 
+def get_google_embedding_data(aoi: ee.Geometry, year: int) -> ee.Image:
+    """
+    Get Google Embedding v1 data for the specified year.
+    
+    Args:
+        aoi: Area of interest
+        year: Year for analysis
+        
+    Returns:
+        ee.Image: 64-band image containing pre-normalized multi-modal satellite data
+    """
+    print(f"Collecting Google Embedding v1 data for {year}...")
+    
+    # Get the Google Embedding v1 collection
+    embeddings = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
+    
+    # Filter for the specified year
+    mosaic = embeddings \
+        .filterDate(f'{year}-01-01', f'{year + 1}-01-01') \
+        .mosaic()
+    
+    # Clip to AOI
+    embedding_data = mosaic.clip(aoi)
+    
+    # Get band count for verification
+    band_count = embedding_data.bandNames().size().getInfo()
+    print(f"Google Embedding v1 data collected: {band_count} bands")
+    print("Data characteristics: 64 bands, 10m resolution, values [-1, 1], pre-normalized")
+    
+    return embedding_data
+
 def get_temporal_alos2_data(aoi: ee.Geometry, year: int, composite_method: str = 'median') -> ee.Image:
     """
     Get monthly ALOS-2 composites for Paul's 2025 temporal modeling.
@@ -712,17 +746,24 @@ def main():
             print(f"Processing {patch_id} ({patch['pixels_x']}×{patch['pixels_y']} pixels)")
             
             # Collect satellite data for this patch
-            if args.temporal_mode:
+            if args.embedding_only:
+                print("Using Google Embedding v1 data only...")
+                print("Expected band count: 64 bands (pre-normalized, no temporal dimension)")
+                embedding_data = get_google_embedding_data(patch_geom, args.year)
+                s1, s2, alos2 = None, None, None
+            elif args.temporal_mode:
                 print("Using Paul's 2025 temporal compositing...")
                 print("Expected band counts: S1=24, S2=132, ALOS2=24, total temporal=180+other bands")
                 s1 = get_temporal_sentinel1_data(patch_geom, args.year, args.monthly_composite)
                 s2 = get_temporal_sentinel2_data(patch_geom, args.year, args.clouds_th, args.monthly_composite)
                 alos2 = get_temporal_alos2_data(patch_geom, args.year, args.monthly_composite)
+                embedding_data = None
             else:
                 print("Using original yearly median compositing...")
                 s1 = get_sentinel1_data(patch_geom, args.year, args.start_date, args.end_date)
                 s2 = get_sentinel2_data(patch_geom, args.year, args.start_date, args.end_date, args.clouds_th)
                 alos2 = get_alos2_data(patch_geom, args.year, args.start_date, args.end_date, include_texture=False, speckle_filter=False)
+                embedding_data = None
             
             # Ensure all satellite data is converted to Float32
             if s1 is not None:
@@ -731,10 +772,24 @@ def main():
                 s2 = s2.toFloat()
             if alos2 is not None:
                 alos2 = alos2.toFloat()
+            if embedding_data is not None:
+                embedding_data = embedding_data.toFloat()
             
             # Build patch data step by step with robust error handling
             print("Building patch data...")
             valid_bands = []
+            
+            # Add Google Embedding data if available (embedding_only mode)
+            if embedding_data is not None:
+                try:
+                    band_names = embedding_data.bandNames().getInfo()
+                    if band_names:
+                        valid_bands.append(embedding_data)
+                        print(f"  Added Google Embedding v1 data: {len(band_names)} bands")
+                    else:
+                        print("  Google Embedding data has no valid bands, skipping")
+                except Exception as e:
+                    print(f"  Failed to process Google Embedding data: {e}")
             
             # Add S1 bands if available
             if s1 is not None:
@@ -791,19 +846,22 @@ def main():
                 except Exception as e:
                     print(f"  Failed to process ALOS2 data: {e}")
             
-            # Add DEM data if available
-            dem_data = get_dem_data(patch_geom)
-            if dem_data is not None:
-                try:
-                    dem_data = dem_data.toFloat()
-                    band_names = dem_data.bandNames().getInfo()
-                    if band_names:
-                        valid_bands.append(dem_data)
-                        print(f"  Added DEM data: {len(band_names)} bands")
-                    else:
-                        print("  DEM data has no valid bands, skipping")
-                except Exception as e:
-                    print(f"  Failed to process DEM data: {e}")
+            # Add DEM data if available (skip for embedding_only mode since it's included in embedding)
+            if not args.embedding_only:
+                dem_data = get_dem_data(patch_geom)
+                if dem_data is not None:
+                    try:
+                        dem_data = dem_data.toFloat()
+                        band_names = dem_data.bandNames().getInfo()
+                        if band_names:
+                            valid_bands.append(dem_data)
+                            print(f"  Added DEM data: {len(band_names)} bands")
+                        else:
+                            print("  DEM data has no valid bands, skipping")
+                    except Exception as e:
+                        print(f"  Failed to process DEM data: {e}")
+            else:
+                print("  Skipping DEM data (already included in Google Embedding v1)")
             
             # Add canopy height data if available
             canopy_ht = get_canopyht_data(patch_geom)
@@ -883,9 +941,13 @@ def main():
                 band_count = patch_data.bandNames().length()
                 # Get geojson file name (without extension)
                 geojson_name = os.path.splitext(os.path.basename(args.aoi))[0]
-                # Compose fileNamePrefix as requested, including temporal indicator
-                temporal_suffix = "_temporal" if args.temporal_mode else ""
-                fileNamePrefix = f"{geojson_name}{temporal_suffix}_bandNum{{}}_scale{args.scale}_{patch_id}".format(band_count.getInfo() if hasattr(band_count, 'getInfo') else band_count)
+                # Compose fileNamePrefix as requested, including mode indicator
+                mode_suffix = ""
+                if args.embedding_only:
+                    mode_suffix = "_embedding"
+                elif args.temporal_mode:
+                    mode_suffix = "_temporal"
+                fileNamePrefix = f"{geojson_name}{mode_suffix}_bandNum{{}}_scale{args.scale}_{patch_id}".format(band_count.getInfo() if hasattr(band_count, 'getInfo') else band_count)
                 
                 if args.export_patches:
                     # Note: scale is implicitly determined by region size / dimensions
@@ -913,7 +975,11 @@ def main():
         # Fallback: process whole AOI as before
         print("Processing whole AOI (not patch-based)...")
         
-        if args.temporal_mode:
+        if args.embedding_only:
+            print("Using Google Embedding v1 data only...")
+            print("Expected band count: 64 bands (pre-normalized, no temporal dimension)")
+            data = get_google_embedding_data(aoi_buffered, args.year).toFloat()
+        elif args.temporal_mode:
             print("Using Paul's 2025 temporal compositing...")
             print("Expected band counts: S1=24, S2=132, ALOS2=24, total temporal=180+other bands")
             s1 = get_temporal_sentinel1_data(aoi_buffered, args.year, args.monthly_composite).toFloat()
@@ -929,7 +995,15 @@ def main():
             # Only add ALOS2 bands that exist
             alos2_band_names = alos2.bandNames().getInfo()
             data = s1.addBands(s2).addBands(alos2)
-        dem_data = get_dem_data(aoi_buffered)
+        # For embedding_only mode, Google Embedding already includes multi-modal data
+        # So we only add canopy height and forest mask, not DEM (already included in embedding)
+        if not args.embedding_only:
+            dem_data = get_dem_data(aoi_buffered)
+            if dem_data is not None:
+                dem_data = dem_data.toFloat()
+                data = data.addBands(dem_data)
+        
+        # Always add canopy height and forest mask regardless of mode
         canopy_ht = get_canopyht_data(aoi_buffered)
         forest_mask = create_forest_mask(
             args.mask_type,
@@ -940,18 +1014,11 @@ def main():
         )
         
         # Convert to Float32 if not None
-        if dem_data is not None:
-            dem_data = dem_data.toFloat()
         if canopy_ht is not None:
             canopy_ht = canopy_ht.toFloat()
-        if forest_mask is not None:
-            forest_mask = forest_mask.toFloat()
-        # Add additional data bands
-        if dem_data is not None:
-            data = data.addBands(dem_data)
-        if canopy_ht is not None:
             data = data.addBands(canopy_ht)
         if forest_mask is not None:
+            forest_mask = forest_mask.toFloat()
             data = data.updateMask(forest_mask)
         
         # Get GEDI vector data
