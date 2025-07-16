@@ -13,6 +13,7 @@ source chm_env/bin/activate
 ### Project Planning and Status
 - **Main Training Plan**: `docs/reference_height_training_plan.md` - Comprehensive 3-scenario comparison framework
 - **Scenario 3 Implementation**: `docs/scenario3_implementation_plan.md` - Detailed plan for target region GEDI adaptation
+- **Height Correlation Analysis**: `docs/height_correlation_analysis_plan.md` - Plan and initial results for auxiliary height data analysis.
 - **Slurm Instructions**: `docs/slurm_instruction.md` - HPC usage guidelines for Annuna server
 
 ### Key Documentation Files
@@ -58,6 +59,40 @@ source chm_env/bin/activate
   - Yearly product (no temporal dimension)
 - **Usage**: Use `--embedding-only` flag to process only Google Embedding data
 - **Implementation**: `get_google_embedding_data()` function in `chm_main.py`
+
+### ✅ **Extracted Embedding Patch Dataset** - 📊 **COMPLETED**
+- **Total Patches**: 189 patches across all three regions
+- **Dataset Size**: 1.38 GB (7.3 MB per patch average)
+- **Patch Dimensions**: 256×256 pixels at 10m resolution (2.56km × 2.56km)
+- **Band Count**: 69-70 bands per patch (64 embedding + 5-6 additional bands)
+- **Data Type**: Float32, pre-normalized values in [-1, 1] range
+- **Year**: 2022 data
+- **Quality**: All patches validated as properly normalized
+
+#### **Regional Distribution**
+| Region | Area ID | Patches | Avg Bands | File Size | Value Range | 
+|--------|---------|---------|-----------|-----------|-------------|
+| **Hyogo** | dchm_04hf3 | 63 | 69 | 7.2 MB | 0.025 to 0.293 |
+| **Kochi** | dchm_05LE4 | 63 | 70 | 7.3 MB | 0.004 to 0.293 |
+| **Tochigi** | dchm_09gd4 | 63 | 70 | 7.2 MB | -0.094 to 0.207 |
+
+#### **Band Composition**
+- **Core Embedding**: 64 bands (Google Embedding v1)
+- **Additional Bands**: 5-6 bands (canopy height, forest mask, GEDI data)
+- **Total**: 69-70 bands per patch depending on available auxiliary data
+
+#### **Data Quality Verification**
+- ✅ All values within expected [-1, 1] range
+- ✅ Consistent 256×256 pixel dimensions
+- ✅ Proper Float32 data type
+- ✅ Valid CRS (EPSG:4326)
+- ✅ Complete coverage across all three study regions
+
+#### **Usage for Training**
+- **Ready for ML**: Pre-normalized, no additional preprocessing required
+- **Patch Format**: Compatible with existing PyTorch/TensorFlow workflows
+- **File Location**: `chm_outputs/*embedding*scale10*.tif`
+- **Recommended Use**: Direct input to CNN/MLP models for canopy height prediction
 
 ## Project Completion Status
 
