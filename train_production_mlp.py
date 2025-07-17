@@ -110,7 +110,8 @@ class ProductionReferenceDataset(Dataset):
     
     def __init__(self, patch_dir: str, reference_tif_path: str, patch_pattern: str = "*05LE4*",
                  max_samples_per_patch: int = 100000, min_height: float = 0.0, max_height: float = 100.0,
-                 use_height_stratification: bool = True, augment_factor: int = 3, supervision_mode: str = "reference"):
+                 use_height_stratification: bool = True, augment_factor: int = 3, supervision_mode: str = "reference",
+                 band_selection: str = "all"):
         
         self.patch_dir = Path(patch_dir)
         self.reference_tif_path = reference_tif_path
@@ -121,6 +122,7 @@ class ProductionReferenceDataset(Dataset):
         self.use_height_stratification = use_height_stratification
         self.augment_factor = augment_factor
         self.supervision_mode = supervision_mode  # "reference" or "gedi_only"
+        self.band_selection = band_selection  # "all", "embedding", "original", "auxiliary"
         
         # Find all patches
         self.patch_files = self._find_patches()
@@ -128,7 +130,7 @@ class ProductionReferenceDataset(Dataset):
         
         # Load all data
         self.features, self.targets, self.height_bins = self._load_all_data()
-        print(f"Loaded {len(self.features)} training samples with {supervision_mode} supervision")
+        print(f"Loaded {len(self.features)} training samples with {supervision_mode} supervision using {band_selection} bands")
         
         # Advanced preprocessing
         self._preprocess_features()
@@ -193,8 +195,12 @@ class ProductionReferenceDataset(Dataset):
     def _extract_patch_data(self, patch_file):
         """Extract training data from a single patch using band utilities"""
         try:
-            # Extract bands by name using utility function
-            satellite_bands, target_band = extract_bands_by_name(patch_file, self.supervision_mode)
+            # Extract bands by name using utility function with band selection
+            satellite_bands, target_band = extract_bands_by_name(
+                patch_file, 
+                self.supervision_mode, 
+                self.band_selection
+            )
         except Exception as e:
             print(f"⚠️  Error extracting bands from {patch_file}: {e}")
             return np.array([]), np.array([])
@@ -300,7 +306,9 @@ class ProductionReferenceDataset(Dataset):
         # Ensure targets are float32
         self.targets = self.targets.astype(np.float32)
         
-        print(f"Selected {np.sum(self.selected_features)}/30 features after variance filtering")
+        n_selected = np.sum(self.selected_features)
+        n_total = len(self.selected_features)
+        print(f"Selected {n_selected}/{n_total} features after variance filtering")
     
     def __len__(self):
         return len(self.features)
@@ -430,8 +438,8 @@ def train_production_mlp(dataset, model, device, epochs=200, batch_size=2048,
             best_val_r2 = val_r2
             patience_counter = 0
             
-            # Save best model with supervision mode in filename
-            model_filename = f'chm_outputs/production_mlp_{dataset.supervision_mode}_best.pth'
+            # Save best model with supervision mode and band selection in filename
+            model_filename = f'chm_outputs/production_mlp_{dataset.supervision_mode}_{dataset.band_selection}_best.pth'
             torch.save({
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
@@ -440,7 +448,8 @@ def train_production_mlp(dataset, model, device, epochs=200, batch_size=2048,
                 'val_loss': val_loss,
                 'scaler': dataset.scaler,
                 'selected_features': dataset.selected_features,
-                'supervision_mode': dataset.supervision_mode
+                'supervision_mode': dataset.supervision_mode,
+                'band_selection': dataset.band_selection
             }, model_filename)
             
         else:
@@ -456,10 +465,13 @@ def train_production_mlp(dataset, model, device, epochs=200, batch_size=2048,
 def main():
     parser = argparse.ArgumentParser(description='Production MLP training for reference heights')
     parser.add_argument('--patch-dir', default='chm_outputs/enhanced_patches/', help='Directory containing patches')
+    parser.add_argument('--patch-pattern', default='*05LE4*', help='Pattern to match patch files')
     parser.add_argument('--reference-tif', default='downloads/dchm_05LE4.tif', help='Reference height TIF')
     parser.add_argument('--output-dir', default='chm_outputs/production_mlp_results/', help='Output directory')
     parser.add_argument('--supervision-mode', choices=['reference', 'gedi_only'], default='reference', 
                        help='Supervision mode: reference (dense) or gedi_only (sparse)')
+    parser.add_argument('--band-selection', choices=['all', 'embedding', 'original', 'auxiliary'], 
+                       default='all', help='Band selection mode: all, embedding (A00-A63), original (30-band), auxiliary')
     parser.add_argument('--epochs', type=int, default=200, help='Number of epochs')
     parser.add_argument('--batch-size', type=int, default=2048, help='Batch size')
     parser.add_argument('--learning-rate', type=float, default=0.001, help='Learning rate')
@@ -478,16 +490,19 @@ def main():
     print(f"📁 Patch directory: {args.patch_dir}")
     print(f"📊 Output directory: {args.output_dir}")
     print(f"🎯 Supervision mode: {args.supervision_mode}")
+    print(f"🎵 Band selection: {args.band_selection}")
     
     try:
         # Load dataset
         print(f"📂 Loading production dataset with {args.supervision_mode} supervision...")
         dataset = ProductionReferenceDataset(
             patch_dir=args.patch_dir,
+            patch_pattern=args.patch_pattern,
             reference_tif_path=args.reference_tif,
             max_samples_per_patch=args.max_samples,
             augment_factor=args.augment_factor,
-            supervision_mode=args.supervision_mode
+            supervision_mode=args.supervision_mode,
+            band_selection=args.band_selection
         )
         
         # Create model
@@ -525,12 +540,13 @@ def main():
             print("📈 Moderate improvement - consider further optimization")
         
         # Save model path info
-        model_path = f'chm_outputs/production_mlp_{args.supervision_mode}_best.pth'
+        model_path = f'chm_outputs/production_mlp_{args.supervision_mode}_{args.band_selection}_best.pth'
         print(f"💾 Best model saved to: {model_path}")
         
         # Save training results
         results = {
             'supervision_mode': args.supervision_mode,
+            'band_selection': args.band_selection,
             'best_val_r2': float(best_val_r2),
             'improvement_over_unet': float(best_val_r2 - 0.074),
             'train_losses': [float(x) for x in train_losses],
@@ -541,7 +557,7 @@ def main():
             'model_path': model_path
         }
         
-        results_filename = f'production_mlp_{args.supervision_mode}_results.json'
+        results_filename = f'production_mlp_{args.supervision_mode}_{args.band_selection}_results.json'
         with open(os.path.join(args.output_dir, results_filename), 'w') as f:
             json.dump(results, f, indent=2)
         

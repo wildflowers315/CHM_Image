@@ -102,9 +102,17 @@ class MLPPredictor:
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
         
         # Extract model parameters
-        input_dim = checkpoint.get('input_features', 30)
         self.scaler = checkpoint.get('scaler')
         self.selected_features = checkpoint.get('selected_features')
+        self.band_selection = checkpoint.get('band_selection', 'all')
+        
+        # Calculate input dimension from selected features or use saved value
+        if self.selected_features is not None:
+            input_dim = np.sum(self.selected_features)
+        else:
+            input_dim = checkpoint.get('input_features', 30)
+            
+        print(f"   Calculated input dimension: {input_dim} (from selected features)")
         
         # Create model
         self.model = AdvancedReferenceHeightMLP(
@@ -120,6 +128,7 @@ class MLPPredictor:
         print(f"✅ Model loaded successfully")
         print(f"   Input features: {input_dim}")
         print(f"   Selected features: {np.sum(self.selected_features) if self.selected_features is not None else 'All'}")
+        print(f"   Band selection: {self.band_selection}")
         print(f"   Device: {self.device}")
         
     def predict_patch(self, patch_file: str, output_file: str = None):
@@ -134,14 +143,20 @@ class MLPPredictor:
             crs = src.crs
             height, width = src.height, src.width
         
-        # Extract satellite bands using robust band utilities
+        # Extract satellite bands using robust band utilities with band selection
         # This approach works with all patch types (original, enhanced, future formats)
         try:
-            satellite_features, _ = extract_bands_by_name(patch_file, supervision_mode="reference")
+            satellite_features, _ = extract_bands_by_name(
+                patch_file, 
+                supervision_mode="reference", 
+                band_selection=self.band_selection
+            )
         except Exception as e:
             print(f"⚠️  Warning: Could not extract bands using band utilities, falling back to legacy method: {e}")
             # Fallback to legacy method if band utilities fail
-            if patch_data.shape[0] >= 30:
+            if self.band_selection == 'embedding':
+                raise ValueError(f"Google Embedding band extraction failed and no legacy fallback available for embedding bands")
+            elif patch_data.shape[0] >= 30:
                 satellite_features = patch_data[:30]  # Always use first 30 satellite bands
             else:
                 raise ValueError(f"Patch must have at least 30 bands, got {patch_data.shape[0]}")
@@ -150,7 +165,7 @@ class MLPPredictor:
         satellite_features = np.nan_to_num(satellite_features, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Reshape for prediction
-        pixels = satellite_features.reshape(satellite_features.shape[0], -1).T  # (H*W, 30_bands)
+        pixels = satellite_features.reshape(satellite_features.shape[0], -1).T  # (H*W, n_bands)
         
         # Apply preprocessing
         if self.scaler is not None:

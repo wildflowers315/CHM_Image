@@ -42,27 +42,75 @@ def find_band_by_name(tif_path: str, band_name: str) -> Optional[int]:
     band_info = get_band_info(tif_path)
     return band_info.get(band_name)
 
-def find_satellite_bands(tif_path: str) -> List[int]:
+def find_satellite_bands(tif_path: str, band_selection: str = "all") -> List[int]:
     """
-    Find all satellite feature bands (excludes rh and reference_height).
+    Find satellite feature bands based on selection mode.
     
     Args:
         tif_path: Path to TIF file
+        band_selection: "all", "embedding", "original", "auxiliary"
         
     Returns:
         List of band indices (0-based) for satellite features
     """
     band_info = get_band_info(tif_path)
     
-    # Exclude special bands
-    exclude_bands = {'rh', 'reference_height'}
+    if band_selection == "embedding":
+        # Only A00-A63 Google Embedding bands
+        embedding_bands = []
+        for band_name, band_idx in band_info.items():
+            if band_name and band_name.startswith('A') and len(band_name) == 3:
+                try:
+                    band_num = int(band_name[1:])
+                    if 0 <= band_num <= 63:
+                        embedding_bands.append((band_idx, band_num))
+                except ValueError:
+                    continue
+        # Sort by band number and return indices
+        embedding_bands.sort(key=lambda x: x[1])
+        return [idx for idx, _ in embedding_bands]
     
-    satellite_bands = []
-    for band_name, band_idx in band_info.items():
-        if band_name not in exclude_bands:
-            satellite_bands.append(band_idx)
+    elif band_selection == "auxiliary":
+        # Auxiliary height bands + forest mask
+        aux_bands = []
+        aux_height_names = ['ch_potapov2021', 'ch_lang2022', 'ch_tolan2024', 'ch_pauls2024']
+        for band_name, band_idx in band_info.items():
+            if band_name in aux_height_names or band_name == 'forest_mask':
+                aux_bands.append(band_idx)
+        return sorted(aux_bands)
     
-    return sorted(satellite_bands)
+    elif band_selection == "original":
+        # Original 30-band satellite data (excludes A00-A63, auxiliary, and supervision)
+        exclude_bands = {'rh', 'reference_height', 'forest_mask'}
+        exclude_bands.update(['ch_potapov2021', 'ch_lang2022', 'ch_tolan2024', 'ch_pauls2024'])
+        
+        original_bands = []
+        for band_name, band_idx in band_info.items():
+            # Skip Google Embedding bands (A00-A63)
+            if band_name and band_name.startswith('A') and len(band_name) == 3:
+                try:
+                    band_num = int(band_name[1:])
+                    if 0 <= band_num <= 63:
+                        continue
+                except ValueError:
+                    pass
+            
+            # Skip excluded bands
+            if band_name not in exclude_bands:
+                original_bands.append(band_idx)
+        
+        return sorted(original_bands)
+    
+    else:  # band_selection == "all"
+        # All bands except supervision targets
+        exclude_bands = {'rh', 'reference_height'}
+        
+        satellite_bands = []
+        for band_name, band_idx in band_info.items():
+            if band_name not in exclude_bands:
+                satellite_bands.append(band_idx)
+        
+        return sorted(satellite_bands)
 
 def find_supervision_band(tif_path: str, supervision_mode: str) -> Optional[int]:
     """
@@ -76,19 +124,32 @@ def find_supervision_band(tif_path: str, supervision_mode: str) -> Optional[int]
         Band index (0-based) or None if not found
     """
     if supervision_mode == "reference":
-        return find_band_by_name(tif_path, "reference_height")
+        # Try reference_height first, then fall back to auxiliary height bands
+        ref_idx = find_band_by_name(tif_path, "reference_height")
+        if ref_idx is not None:
+            return ref_idx
+        
+        # For Google Embedding files, try auxiliary height bands as reference
+        aux_height_names = ['ch_pauls2024', 'ch_tolan2024', 'ch_lang2022', 'ch_potapov2021']
+        for band_name in aux_height_names:
+            idx = find_band_by_name(tif_path, band_name)
+            if idx is not None:
+                return idx
+        
+        return None
     elif supervision_mode == "gedi_only":
         return find_band_by_name(tif_path, "rh")
     else:
         raise ValueError(f"Unknown supervision mode: {supervision_mode}")
 
-def extract_bands_by_name(tif_path: str, supervision_mode: str = "reference") -> Tuple[np.ndarray, np.ndarray]:
+def extract_bands_by_name(tif_path: str, supervision_mode: str = "reference", band_selection: str = "all") -> Tuple[np.ndarray, np.ndarray]:
     """
     Extract satellite features and supervision target by band names.
     
     Args:
         tif_path: Path to TIF file
         supervision_mode: "reference" or "gedi_only"
+        band_selection: "all", "embedding", "original", "auxiliary"
         
     Returns:
         Tuple of (satellite_features, supervision_target)
@@ -98,14 +159,17 @@ def extract_bands_by_name(tif_path: str, supervision_mode: str = "reference") ->
     with rasterio.open(tif_path) as src:
         patch_data = src.read()
     
-    # Find satellite bands
-    satellite_band_indices = find_satellite_bands(tif_path)
+    # Find satellite bands based on selection mode
+    satellite_band_indices = find_satellite_bands(tif_path, band_selection)
     
     # Find supervision band
     supervision_band_idx = find_supervision_band(tif_path, supervision_mode)
     
     if supervision_band_idx is None:
         raise ValueError(f"Could not find supervision band for mode '{supervision_mode}' in {tif_path}")
+    
+    if not satellite_band_indices:
+        raise ValueError(f"No satellite bands found for selection mode '{band_selection}' in {tif_path}")
     
     # Extract data
     satellite_features = patch_data[satellite_band_indices]
