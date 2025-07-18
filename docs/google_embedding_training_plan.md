@@ -52,8 +52,8 @@ Following the proven methodology from `docs/reference_height_training_plan.md`, 
 - **Training Region**: Hyogo (05LE4) - 63 patches
 - **Validation**: Direct cross-region application to Kochi (04hf3) and Tochigi (09gd4)
 - **Key Question**: Does Google Embedding v1 outperform original 30-band satellite data?
-- **Status**: ✅ Successfully completed with outstanding performance
-- **Results**: Training R² = 0.8734 (significant improvement over original 30-band MLP R² = 0.5026)
+- **Status**: ✅ Successfully completed with outstanding performance in the training region, but poor generalization.
+- **Results**: Training R² = 0.8734 (significant improvement over original 30-band MLP R² = 0.5026). However, the cross-region R² is -1.68 without bias correction, indicating the model does not generalize well to other regions without calibration.
 - **Model**: `chm_outputs/production_mlp_reference_embedding_best.pth`
 - **Predictions**: `chm_outputs/google_embedding_scenario1_predictions/{kochi,hyogo,tochigi}/`
 
@@ -99,10 +99,10 @@ Based on `docs/reference_height_training_plan.md`, we will compare against both 
 
 | Approach | Input Features | Training R² | Cross-Region R² | Status | Prediction Path |
 |----------|---------------|-------------|-----------------|--------|------------------|
-| **Original Satellite MLP** | 30 bands | 0.5026 | +0.012 (bias-corrected) | ✅ Production Ready | `chm_outputs/cross_region_predictions/` |
+| **Original Satellite MLP** | 30 bands | 0.5026 | -26.58 (no bias correction) | ✅ Production Ready | `chm_outputs/cross_region_predictions/` |
 | **Original Satellite Ensemble (2A)** | 30 bands × 2 models | 0.1611 | -8.58 to -7.95 | ❌ Failed | `chm_outputs/scenario2_cross_region_predictions/` |
 | **Original Satellite Ensemble (2B)** | 30 bands × 2 models | N/A | -5.14 to -9.95 | ❌ Failed | `chm_outputs/scenario2b_cross_region_predictions/` |
-| **Google Embedding Scenario 1** | 64 bands | 0.8734 | Under evaluation | ✅ Completed | `chm_outputs/google_embedding_scenario1_predictions/` |
+| **Google Embedding Scenario 1** | 64 bands | 0.8734 | -1.68 (no bias correction) | ✅ Completed | `chm_outputs/google_embedding_scenario1_predictions/` |
 | **Google Embedding Scenario 2A** | 64 bands × 2 models (U-Net+MLP) | R² > 0.5500 | Expected > 0.3 | 🔄 Planned | `chm_outputs/google_embedding_scenario2a_predictions/` |
 | **Google Embedding Scenario 2B** | 64 bands × 2 models (MLP+MLP) | R² > 0.5500 | Expected > 0.3 | 🔄 Planned | `chm_outputs/google_embedding_scenario2b_predictions/` |
 
@@ -110,14 +110,14 @@ Based on `docs/reference_height_training_plan.md`, we will compare against both 
 From `reference_height_training_plan.md`:
 
 #### **✅ Production MLP (Scenario 1 - Reference-Only)**
-- **Model**: `chm_outputs/production_mlp_best.pth` (R² = 0.5026)
+- **Model**: `chm_outputs/production_mlp_best.pth`
 - **Architecture**: AdvancedReferenceHeightMLP with 30 satellite features
+- **Performance**: Training R² = 0.5026. The non-bias-corrected cross-region R² is -26.58, indicating poor generalization without calibration.
 - **Cross-Region Predictions**: 
   - Kochi: `chm_outputs/cross_region_predictions/04hf3_kochi/*_mlp_prediction.tif`
   - Tochigi: `chm_outputs/cross_region_predictions/09gd4_tochigi/*_mlp_prediction.tif`
   - Hyogo: `chm_outputs/cross_region_predictions/05LE4_hyogo/*_mlp_prediction.tif`
-- **Performance**: 161 patches, 10.55M pixels, 100% success rate
-- **Bias Correction**: Region-specific factors (Kochi: 2.5x, Tochigi: 3.7x)
+- **Bias Correction**: With region-specific factors (Kochi: 2.5x, Tochigi: 3.7x), the model is production-ready.
 
 #### **❌ Failed Ensemble Approaches (Scenario 2A & 2B)**
 - **Scenario 2A**: GEDI Spatial U-Net + Reference MLP Ensemble
@@ -169,6 +169,14 @@ gedi_model = AdvancedReferenceHeightMLP(
 ```
 
 ### **Data Processing Pipeline**
+### **Memory-Efficient Evaluation**
+To handle large-scale evaluation across multiple regions and scenarios without running into memory limitations, the evaluation scripts (`evaluate_google_embedding_scenario1.py`) implement a memory management strategy:
+
+- **Garbage Collection**: Python's `gc` module is used to explicitly trigger garbage collection.
+- **Per-Region Cleanup**: After processing each region, large data variables (e.g., aggregated pixel arrays) are deleted using `del` and `gc.collect()` is called to free up memory.
+- **Per-Scenario Cleanup**: Similarly, after a scenario's results are plotted, the corresponding data is cleared from memory before the next scenario begins.
+
+This ensures that memory usage remains stable throughout the evaluation process, even when `--max-patches` is set to a high value.
 ```python
 def load_google_embedding_data(patch_path, include_aux_bands=False):
     """Load Google Embedding data with optional auxiliary bands"""

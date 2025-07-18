@@ -15,6 +15,7 @@ from rasterio.transform import from_bounds
 from pathlib import Path
 import glob
 import json
+import gc
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from scipy import stats
 from datetime import datetime
@@ -23,10 +24,10 @@ from functools import partial
 
 def process_prediction_file(args):
     """Helper function for parallel processing of prediction files"""
-    ref_path, pred_file, bias_correction_factor, region_id, apply_bias_correction, evaluator = args
+    ref_path, pred_file, bias_correction_factor, region_id, apply_bias_correction = args
     
     try:
-        ref_aligned, pred_aligned = evaluator.align_prediction_with_reference(ref_path, pred_file)
+        ref_aligned, pred_aligned = GoogleEmbeddingEvaluator.align_prediction_with_reference(ref_path, pred_file)
         
         if ref_aligned is not None and pred_aligned is not None:
             # Apply bias correction if requested
@@ -119,7 +120,8 @@ class GoogleEmbeddingEvaluator:
         print(f"  Returning {len(result)} files for processing")
         return result
     
-    def align_prediction_with_reference(self, ref_path, pred_path, max_pixels=100000):
+    @staticmethod
+    def align_prediction_with_reference(ref_path, pred_path, max_pixels=100000):
         """Align prediction with reference data using proper spatial alignment"""
         try:
             # Import the raster utils
@@ -233,21 +235,21 @@ class GoogleEmbeddingEvaluator:
             
             # Prepare arguments for parallel processing
             args_list = [
-                (ref_path, pred_file, bias_correction_factor, region_id, apply_bias_correction, self)
+                (ref_path, pred_file, bias_correction_factor, region_id, apply_bias_correction)
                 for pred_file in pred_files
             ]
             
-            # Use parallel processing
+            # Use a memory-efficient parallel processing iterator
             num_cores = min(cpu_count(), len(pred_files))
             with Pool(num_cores) as pool:
-                processing_results = pool.map(process_prediction_file, args_list)
-            
-            # Collect results
-            for ref_aligned, pred_aligned in processing_results:
-                if ref_aligned is not None and pred_aligned is not None:
-                    aggregated_ref.extend(ref_aligned)
-                    aggregated_pred.extend(pred_aligned)
-            
+                for ref_aligned, pred_aligned in pool.imap_unordered(process_prediction_file, args_list):
+                    if ref_aligned is not None and pred_aligned is not None:
+                        aggregated_ref.extend(ref_aligned)
+                        aggregated_pred.extend(pred_aligned)
+                        # Clean up intermediate results immediately
+                        del ref_aligned, pred_aligned
+                        gc.collect()
+
             print(f"  Collected {len(aggregated_ref)} reference pixels and {len(aggregated_pred)} prediction pixels")
             
             # Calculate metrics for aggregated data (lower threshold like analysis utils)
@@ -274,7 +276,10 @@ class GoogleEmbeddingEvaluator:
                     }
                     
                     print(f"  {region_name}: R² = {metrics['r2']:.3f}, RMSE = {metrics['rmse']:.2f}m, N = {metrics['n_samples']:,}")
-        
+                    # Clean up memory for the next region
+                    del aggregated_ref, aggregated_pred
+                    gc.collect()
+                    
         return results, aggregated_data
     
     def create_correlation_plot(self, data_dict, scenario_name, output_file):
@@ -435,6 +440,16 @@ def main():
         max_patches=args.max_patches
     )
     
+        # Create correlation plots
+    if embedding_data:
+        evaluator.create_correlation_plot(
+            embedding_data,
+            "Google Embedding Scenario 1 (64-band)",
+            f"{args.output_dir}/google_embedding_correlation.png"
+        )
+        del embedding_data
+        gc.collect()
+    
     # Evaluate Original 30-band MLP (if available)
     original_results, original_data = [], {}
     if os.path.exists(args.original_mlp_dir):
@@ -449,20 +464,15 @@ def main():
     else:
         print(f"\n⚠️  Original MLP directory not found: {args.original_mlp_dir}")
     
-    # Create correlation plots
-    if embedding_data:
-        evaluator.create_correlation_plot(
-            embedding_data,
-            "Google Embedding Scenario 1 (64-band)",
-            f"{args.output_dir}/google_embedding_correlation.png"
-        )
-    
+
     if original_data:
         evaluator.create_correlation_plot(
             original_data,
             "Original Satellite MLP (30-band)",
             f"{args.output_dir}/original_satellite_correlation.png"
         )
+        del original_data
+        gc.collect()
     
     # Create comparison analysis
     all_results = embedding_results + original_results

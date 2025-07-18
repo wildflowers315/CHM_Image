@@ -47,6 +47,21 @@ source chm_env/bin/activate
 
 - You can use GPU under HPC environments for speed up training and prediction.
 
+## Memory Management
+
+### Garbage Collection
+- For scripts that process large amounts of data (e.g., evaluation scripts running on many patches), it's important to manage memory explicitly.
+- **Strategy**: Use `del` to remove large variables that are no longer needed, followed by `gc.collect()` to trigger Python's garbage collector.
+- **Example**:
+  ```python
+  import gc
+
+  # After a large object is used and no longer needed
+  del large_data_variable
+  gc.collect()
+  ```
+- This is especially important in loops that process data for different regions or scenarios, to prevent memory from accumulating.
+
 ## Data Input Options
 
 ### Google Embedding v1 Support - ✅ **PRODUCTION READY**
@@ -108,20 +123,20 @@ source chm_env/bin/activate
 
 #### **Scenario 1: Reference-Only Training** - ✅ **FULLY COMPLETED**
 - **Status**: Production-ready MLP model with bias correction
-- **Performance**: R² = 0.5026 (6.7x improvement over U-Net)
+- **Performance**: Training R² = 0.5026; Cross-region R² = -26.58 (without bias correction)
 - **Cross-Region**: 161 patches, 10.55M pixels, 100% success rate
 - **Key Files**: `chm_outputs/production_mlp_best.pth`, `predict_mlp_cross_region.py`
 - **Bias Correction**: Region-specific factors (Kochi: 2.5x, Tochigi: 3.7x)
 
 #### **Google Embedding Scenario 1: Reference-Only Training** - ✅ **COMPLETED WITH OUTSTANDING RESULTS**
 - **Status**: Google Embedding v1 (64-band) model successfully trained and evaluated
-- **Performance**: R² = 0.8734 (73% improvement over original 30-band satellite MLP)
+- **Performance**: Training R² = 0.8734; Cross-region R² = -1.68 (without bias correction)
 - **Architecture**: AdvancedReferenceHeightMLP with 64 Google Embedding features
 - **Training**: 63,009 samples from Hyogo region, excellent convergence
 - **Model File**: `chm_outputs/production_mlp_reference_embedding_best.pth`
 - **Predictions**: `chm_outputs/google_embedding_scenario1_predictions/{kochi,hyogo,tochigi}/`
-- **Evaluation**: Cross-region evaluation completed, bias correction analysis in progress
-- **Key Achievement**: Demonstrates superior performance of Google Embedding v1 over traditional satellite data
+- **Evaluation**: Cross-region evaluation completed. The model shows a significant negative R² without bias correction, indicating that the model does not generalize well to other regions without calibration.
+- **Key Achievement**: Demonstrates superior performance of Google Embedding v1 over traditional satellite data in the training region.
 
 #### **Scenario 2A: Reference + GEDI Training (Spatial U-Net)** - ❌ **FAILED**
 - **Status**: Completed but failed due to poor GEDI model performance
@@ -171,8 +186,8 @@ source chm_env/bin/activate
 | Approach | Training R² | Cross-Region R² | Status |
 |----------|-------------|-----------------|--------|
 | **U-Net (Scenario 1)** | 0.074 | N/A | ❌ Deprecated |
-| **MLP (Scenario 1)** | 0.5026 | +0.012 (bias-corrected) | ✅ Production |
-| **Google Embedding MLP (Scenario 1)** | 0.8734 | Under evaluation | ✅ **Outstanding** |
+| **MLP (Scenario 1)** | 0.5026 | -26.58 (no bias correction) | ✅ Production |
+| **Google Embedding MLP (Scenario 1)** | 0.8734 | -1.68 (no bias correction) | ✅ **Outstanding** |
 | **Ensemble (Scenario 2A)** | 0.1611 | -8.58 to -7.95 | ❌ Failed |
 | **Dual-MLP (Scenario 2B)** | N/A | -5.14 to -9.95 | ❌ Failed |
 

@@ -3,10 +3,10 @@
 #SBATCH --job-name=eval_google_embed_s1
 #SBATCH --output=logs/%j_evaluate_google_embedding_scenario1.txt
 #SBATCH --error=logs/%j_evaluate_google_embedding_scenario1_error.txt
-#SBATCH --time=0-4:00:00
+#SBATCH --time=0-1:00:00
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=2
-#SBATCH --mem-per-cpu=16G
+#SBATCH --cpus-per-task=8
+#SBATCH --mem-per-cpu=48G
 #SBATCH --partition=main
 
 # Create output directory
