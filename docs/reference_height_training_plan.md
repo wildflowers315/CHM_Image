@@ -976,6 +976,8 @@ The MLP-based reference height training with bias correction is **production-rea
 #### 📁 **Completed Implementation Files**
 ```
 Scenario 2A Files (Complete but Failed):
+├── train_predict_map.py                                # Training script for shift-aware GEDI.  
+├── sbatch/train_shift_aware_scenario2.sh               # Train shift-aware GEDI model
 ├── models/ensemble_mlp.py                              # Ensemble MLP architecture
 ├── train_ensemble_mlp.py                               # Ensemble training pipeline
 ├── predict_ensemble.py                                 # Ensemble prediction pipeline

@@ -41,9 +41,10 @@ def setup_logging(output_dir):
 class EnsemblePredictor:
     """Ensemble prediction using trained GEDI and MLP models"""
     
-    def __init__(self, ensemble_model_path, gedi_model_path, mlp_model_path, device='cuda', gedi_model_type='unet'):
+    def __init__(self, ensemble_model_path, gedi_model_path, mlp_model_path, device='cuda', gedi_model_type='unet', band_selection='all'):
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.gedi_model_type = gedi_model_type
+        self.band_selection = band_selection
         
         # Load ensemble model
         self.ensemble_model = self._load_ensemble_model(ensemble_model_path)
@@ -73,8 +74,32 @@ class EnsemblePredictor:
         checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
 
         if self.gedi_model_type == 'unet':
-            # U-Net architecture expects fixed input channels
-            model = ShiftAwareUNet(in_channels=30).to(self.device)
+            # Determine input channels from band selection and checkpoint
+            if self.band_selection == 'embedding':
+                # For embedding, detect from checkpoint to handle actual saved dimensions
+                if 'enc1.0.weight' in checkpoint:
+                    in_channels = checkpoint['enc1.0.weight'].shape[1]
+                    print(f"Detected {in_channels} input channels from GEDI U-Net checkpoint")
+                else:
+                    in_channels = 64  # Default for pure embedding (A00-A63)
+            elif self.band_selection == 'original':
+                in_channels = 30  # Original 30-band satellite data
+            elif self.band_selection == 'all':
+                # For 'all' mode with original patches, infer from checkpoint
+                if 'enc1.0.weight' in checkpoint:
+                    in_channels = checkpoint['enc1.0.weight'].shape[1]
+                    print(f"Detected {in_channels} input channels from GEDI U-Net checkpoint")
+                else:
+                    in_channels = 30  # Default for original patches with all bands
+            else:
+                # For 'all' or other modes, try to infer from checkpoint
+                if 'enc1.0.weight' in checkpoint:
+                    in_channels = checkpoint['enc1.0.weight'].shape[1]
+                else:
+                    in_channels = 30  # Default fallback
+            
+            print(f"Creating GEDI U-Net model with {in_channels} input channels for band_selection='{self.band_selection}'")
+            model = ShiftAwareUNet(in_channels=in_channels).to(self.device)
             if 'model_state_dict' in checkpoint:
                 model.load_state_dict(checkpoint['model_state_dict'])
             else:
@@ -140,22 +165,37 @@ class EnsemblePredictor:
         Returns:
             numpy array of shape (256, 256) with ensemble predictions
         """
-        # Extract satellite features (first 30 bands)
-        # Note: This function receives patch_data directly, so we use legacy indexing
-        # Band utilities are used in the calling function (predict_region)
-        satellite_features = patch_data[:30].astype(np.float32)
-
-        if satellite_features.shape[0] != 30 or satellite_features.shape[1] != 256 or satellite_features.shape[2] != 256:
-            print(f"⚠️  Unexpected satellite_features shape: {satellite_features.shape}. Skipping patch.")
+        # Extract satellite features (all available bands based on band selection)
+        # Note: This function receives patch_data directly from band_utils extraction
+        # The number of bands depends on band_selection: embedding=64, original=30, etc.
+        
+        # Determine expected band count based on band selection
+        if self.band_selection == 'embedding':
+            expected_bands = 64  # Google Embedding A00-A63
+        elif self.band_selection == 'original':
+            expected_bands = 30  # Original 30-band satellite data
+        else:
+            # For 'all' or other modes, use what's available (but exclude GEDI/reference bands)
+            # Assume the patch_data has satellite features first, followed by target bands
+            if patch_data.shape[0] >= 64:
+                expected_bands = 64  # Likely embedding
+            else:
+                expected_bands = 30  # Likely original
+        
+        satellite_features = patch_data[:expected_bands].astype(np.float32)
+        
+        if satellite_features.shape[1] != 256 or satellite_features.shape[2] != 256:
+            print(f"⚠️  Unexpected patch dimensions: {satellite_features.shape}. Expected: ({expected_bands}, 256, 256)")
             return np.zeros((256, 256)) # Return empty prediction for this patch
         
         h, w = satellite_features.shape[1], satellite_features.shape[2]
 
         # Handle NaN values (same as training)
-        for band_idx in range(30):
+        for band_idx in range(expected_bands):
             band_data = satellite_features[band_idx]
             if np.isnan(band_data).any():
-                if band_idx in [23, 24]:  # GLO30 slope/aspect
+                # For embedding bands, use median; for specific original bands, use 0
+                if self.band_selection == 'original' and band_idx in [23, 24]:  # GLO30 slope/aspect in original 30-band
                     replacement_value = 0.0
                 else:
                     valid_pixels = band_data[~np.isnan(band_data)]
@@ -171,7 +211,7 @@ class EnsemblePredictor:
                     end_i = min(i + 64, h)
                     end_j = min(j + 64, w)
                     block_features = satellite_features[:, i:end_i, j:end_j]
-                    pixel_features_gedi = block_features.reshape(30, -1).T
+                    pixel_features_gedi = block_features.reshape(expected_bands, -1).T
                     if self.gedi_scaler is not None:
                         pixel_features_gedi = self.gedi_scaler.transform(pixel_features_gedi)
                     if self.gedi_feature_selector is not None:
@@ -189,8 +229,7 @@ class EnsemblePredictor:
         # Generate MLP predictions (pixel-wise)
         mlp_predictions = np.zeros((h, w))
         
-        # Process in chunks for memory efficiency
-        chunk_size = 10000
+        # Process in blocks for memory efficiency
         for i in range(0, h, 64):  # Process 64x64 blocks
             for j in range(0, w, 64):
                 end_i = min(i + 64, h)
@@ -198,7 +237,7 @@ class EnsemblePredictor:
                 
                 # Extract pixel features for this block
                 block_features = satellite_features[:, i:end_i, j:end_j]
-                pixel_features = block_features.reshape(30, -1).T  # (n_pixels, 30)
+                pixel_features = block_features.reshape(expected_bands, -1).T  # (n_pixels, n_bands)
                 
                 # Apply MLP preprocessing (scaler and feature selection)
                 mlp_features = pixel_features.copy()
@@ -272,7 +311,7 @@ class EnsemblePredictor:
                 
                 # Extract bands using robust utilities
                 try:
-                    satellite_features, _ = extract_bands_by_name(patch_file, supervision_mode="reference")
+                    satellite_features, _ = extract_bands_by_name(patch_file, supervision_mode="reference", band_selection=self.band_selection)
                     # Create patch_data in expected format for predict_patch
                     patch_data = np.concatenate([satellite_features, np.zeros((2, *satellite_features.shape[1:]))], axis=0)
                 except Exception as e:
@@ -321,12 +360,15 @@ def main():
     parser.add_argument('--ensemble-model', required=True, help='Path to trained ensemble model')
     parser.add_argument('--gedi-model', required=True, help='Path to GEDI shift-aware U-Net model')
     parser.add_argument('--mlp-model', required=True, help='Path to production MLP model')
-    parser.add_argument('--region', required=True, choices=['kochi', 'tochigi', 'both'], 
+    parser.add_argument('--region', required=True, choices=['hyogo', 'kochi', 'tochigi', 'all'], 
                         help='Target region for prediction')
     parser.add_argument('--patch-dir', required=True, help='Directory containing patch files')
     parser.add_argument('--output-dir', required=True, help='Directory to save predictions')
     parser.add_argument('--device', default='cuda', choices=['cuda', 'cpu'], help='Device to use')
     parser.add_argument('--gedi-model-type', default='unet', choices=['unet', 'mlp'], help='Type of GEDI model (unet or mlp)')
+    parser.add_argument('--band-selection', type=str, default='all',
+                       choices=['all', 'embedding', 'original', 'auxiliary'],
+                       help='Band selection: all, embedding (A00-A63), original (30-band), auxiliary')
     
     args = parser.parse_args()
     
@@ -345,17 +387,38 @@ def main():
             gedi_model_path=args.gedi_model,
             mlp_model_path=args.mlp_model,
             device=args.device,
-            gedi_model_type=args.gedi_model_type
+            gedi_model_type=args.gedi_model_type,
+            band_selection=args.band_selection
         )
     
-    # Region-specific configurations
-    region_configs = {
-        'kochi': {'pattern': '04hf3', 'patch_dir': 'chm_outputs/'},
-        'tochigi': {'pattern': '09gd4', 'patch_dir': 'chm_outputs/'}
-    }
+    # Region-specific configurations with dynamic patterns based on band selection
+    if args.band_selection == 'embedding':
+        # Google Embedding patterns
+        region_configs = {
+            'kochi': {'pattern': '04hf3*embedding', 'patch_dir': 'chm_outputs/'},
+            'hyogo': {'pattern': '05LE4*embedding', 'patch_dir': 'chm_outputs/'},
+            'tochigi': {'pattern': '09gd4*embedding', 'patch_dir': 'chm_outputs/'}
+        }
+    elif args.band_selection == 'original':
+        # Original band selection patterns 
+        region_configs = {
+            'kochi': {'pattern': '04hf3_band', 'patch_dir': 'chm_outputs/'},
+            'hyogo': {'pattern': '05LE4_band', 'patch_dir': 'chm_outputs/'},
+            'tochigi': {'pattern': '09gd4_band', 'patch_dir': 'chm_outputs/'}
+        }
+    else:  # 'all' or other band selections with non-embedding patches
+        # All bands from original patches (no embedding suffix)
+        region_configs = {
+            'kochi': {'pattern': '04hf3_band', 'patch_dir': 'chm_outputs/'},
+            'hyogo': {'pattern': '05LE4_band', 'patch_dir': 'chm_outputs/'},
+            'tochigi': {'pattern': '09gd4_band', 'patch_dir': 'chm_outputs/'}
+        }
     
-    # Run predictions
-    regions_to_process = ['kochi', 'tochigi'] if args.region == 'both' else [args.region]
+    # Run predictions  
+    if args.region == 'all':
+        regions_to_process = ['kochi', 'hyogo', 'tochigi']
+    else:
+        regions_to_process = [args.region]
     
     for region in regions_to_process:
         config = region_configs[region]

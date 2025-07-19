@@ -38,7 +38,8 @@ class EnsembleDataset(Dataset):
     
     def __init__(self, patch_dir: str, gedi_model_path: str, mlp_model_path: str, 
                  reference_tif_path: str, patch_pattern: str = "*05LE4*",
-                 max_samples_per_patch: int = 50000, gedi_model_type: str = 'unet'):
+                 max_samples_per_patch: int = 50000, gedi_model_type: str = 'unet',
+                 band_selection: str = 'all'):
         
         self.patch_dir = Path(patch_dir)
         self.gedi_model_path = gedi_model_path
@@ -47,6 +48,7 @@ class EnsembleDataset(Dataset):
         self.patch_pattern = patch_pattern
         self.max_samples_per_patch = max_samples_per_patch
         self.gedi_model_type = gedi_model_type
+        self.band_selection = band_selection
         
         # Load models
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -96,7 +98,28 @@ class EnsembleDataset(Dataset):
             feature_selector = checkpoint.get('selected_features')
         elif model_type == 'unet':
             from models.trainers.shift_aware_trainer import ShiftAwareUNet
-            model = ShiftAwareUNet(in_channels=30).to(self.device)
+            
+            # Determine input channels from band selection
+            if self.band_selection == 'embedding':
+                # For embedding, we need to check what was actually saved in the checkpoint
+                # as it depends on what bands were selected during training
+                if isinstance(checkpoint, dict) and 'enc1.0.weight' in checkpoint:
+                    in_channels = checkpoint['enc1.0.weight'].shape[1]  # Use actual saved dimensions
+                    print(f"Detected {in_channels} input channels from saved GEDI U-Net checkpoint")
+                else:
+                    in_channels = 64  # Default for pure embedding (A00-A63)
+            elif self.band_selection == 'original':
+                in_channels = 30  # Original 30-band satellite data
+            else:
+                # For 'all' or other modes, try to infer from checkpoint
+                # Look for the first conv layer to determine input channels
+                if isinstance(checkpoint, dict) and 'enc1.0.weight' in checkpoint:
+                    in_channels = checkpoint['enc1.0.weight'].shape[1]
+                else:
+                    in_channels = 30  # Default fallback
+            
+            print(f"Creating U-Net model with {in_channels} input channels for band_selection='{self.band_selection}'")
+            model = ShiftAwareUNet(in_channels=in_channels).to(self.device)
             model.load_state_dict(checkpoint)
             scaler = None
             feature_selector = None
@@ -125,7 +148,7 @@ class EnsembleDataset(Dataset):
                 if not check_patch_compatibility(patch_file, "reference"):
                     continue
                 
-                satellite_features, reference_band = extract_bands_by_name(patch_file, supervision_mode="reference")
+                satellite_features, reference_band = extract_bands_by_name(patch_file, supervision_mode="reference", band_selection=self.band_selection)
                 satellite_features = np.nan_to_num(satellite_features.astype(np.float32))
                 
                 valid_ref_mask = (~np.isnan(reference_band)) & (reference_band > 0) & (reference_band <= 100)
@@ -306,6 +329,9 @@ def main():
     parser.add_argument('--gedi-model-type', default='unet', choices=['unet', 'mlp'], help='Type of GEDI model (unet or mlp)')
     parser.add_argument('--model-type', default='simple', choices=['simple', 'advanced', 'adaptive'],
                        help='Type of ensemble model')
+    parser.add_argument('--band-selection', type=str, default='all',
+                       choices=['all', 'embedding', 'original', 'auxiliary'],
+                       help='Band selection: all, embedding (A00-A63), original (30-band), auxiliary')
     
     args = parser.parse_args()
     
@@ -328,6 +354,7 @@ def main():
             mlp_model_path=args.reference_model_path,
             reference_tif_path=args.reference_height_path,
             patch_pattern=args.patch_pattern,
+            band_selection=args.band_selection,
             gedi_model_type=args.gedi_model_type
         )
         

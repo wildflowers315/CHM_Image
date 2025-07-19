@@ -32,50 +32,49 @@ warnings.filterwarnings('ignore')
 class ShiftAwarePatchDataset(Dataset):
     """Dataset for shift-aware training with numerical stability"""
     
-    def __init__(self, patch_files):
+    def __init__(self, patch_files, band_selection='all'):
         self.patch_data = []
+        self.band_selection = band_selection
+        
+        # Import here to avoid circular imports
+        from data.patch_loader import load_patch_data
         
         for patch_file in tqdm(patch_files, desc="Loading patches"):
             try:
-                with rasterio.open(patch_file) as src:
-                    data = src.read().astype(np.float32)
+                # Use the updated load_patch_data function with band selection
+                features, gedi_target, _ = load_patch_data(
+                    patch_file, 
+                    supervision_mode='gedi_only',
+                    band_selection=band_selection,
+                    normalize_bands=True
+                )
+                
+                # Create valid mask for GEDI data
+                valid_mask = (gedi_target > 0) & (gedi_target < 100) & (~np.isnan(gedi_target))
+                
+                if np.sum(valid_mask) >= 10:  # Minimum GEDI samples for training
+                    # Apply numerical stability improvements
+                    features = np.nan_to_num(features, nan=0.0, posinf=100.0, neginf=-100.0)
+                    gedi_target = np.nan_to_num(gedi_target, nan=0.0, posinf=100.0, neginf=0.0)
                     
-                    # Handle different band counts
-                    if data.shape[0] == 31:
-                        features = data[:-1]  # Exclude GEDI labels
-                        gedi_target = data[-1]
-                    elif data.shape[0] == 30:
-                        features = data
-                        gedi_target = np.zeros_like(data[0])  # No labels for pure prediction
-                    else:
-                        continue
+                    # Normalize features
+                    for i in range(features.shape[0]):
+                        band = features[i]
+                        if np.std(band) > 0:
+                            band_norm = (band - np.mean(band)) / (np.std(band) + 1e-8)
+                            features[i] = np.clip(band_norm, -5.0, 5.0)
+                        else:
+                            features[i] = np.zeros_like(band)
                     
-                    # Create valid mask for GEDI data
-                    valid_mask = (gedi_target > 0) & (gedi_target < 100) & (~np.isnan(gedi_target))
+                    # Clip GEDI targets
+                    gedi_target = np.clip(gedi_target, 0.0, 100.0)
                     
-                    if np.sum(valid_mask) >= 10:  # Minimum GEDI samples for training
-                        # Apply numerical stability improvements
-                        features = np.nan_to_num(features, nan=0.0, posinf=100.0, neginf=-100.0)
-                        gedi_target = np.nan_to_num(gedi_target, nan=0.0, posinf=100.0, neginf=0.0)
-                        
-                        # Normalize features
-                        for i in range(features.shape[0]):
-                            band = features[i]
-                            if np.std(band) > 0:
-                                band_norm = (band - np.mean(band)) / (np.std(band) + 1e-8)
-                                features[i] = np.clip(band_norm, -5.0, 5.0)
-                            else:
-                                features[i] = np.zeros_like(band)
-                        
-                        # Clip GEDI targets
-                        gedi_target = np.clip(gedi_target, 0.0, 100.0)
-                        
-                        self.patch_data.append({
-                            'features': torch.FloatTensor(features),
-                            'target': torch.FloatTensor(gedi_target),
-                            'valid_mask': torch.BoolTensor(valid_mask),
-                            'file': os.path.basename(patch_file)
-                        })
+                    self.patch_data.append({
+                        'features': torch.FloatTensor(features),
+                        'target': torch.FloatTensor(gedi_target),
+                        'valid_mask': torch.BoolTensor(valid_mask),
+                        'file': os.path.basename(patch_file)
+                    })
             except Exception as e:
                 print(f"⚠️  Error loading {patch_file}: {e}")
         
@@ -250,10 +249,11 @@ class ShiftAwareUNet(nn.Module):
 class ShiftAwareTrainer:
     """Main trainer class for shift-aware U-Net models"""
     
-    def __init__(self, shift_radius=2, learning_rate=0.0001, batch_size=2):
+    def __init__(self, shift_radius=2, learning_rate=0.0001, batch_size=2, band_selection='all'):
         self.shift_radius = shift_radius
         self.learning_rate = learning_rate
         self.batch_size = batch_size
+        self.band_selection = band_selection
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
     def train(self, train_patches, val_patches, epochs=50, output_dir="chm_outputs/models/shift_aware"):
@@ -275,16 +275,23 @@ class ShiftAwareTrainer:
         print(f"📊 Validation patches: {len(val_patches)}")
         
         # Create datasets
-        train_dataset = ShiftAwarePatchDataset(train_patches)
-        val_dataset = ShiftAwarePatchDataset(val_patches)
+        train_dataset = ShiftAwarePatchDataset(train_patches, self.band_selection)
+        val_dataset = ShiftAwarePatchDataset(val_patches, self.band_selection)
         
         # Create data loaders
         train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=2)
         val_loader = DataLoader(val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=2)
         
-        # Get input channels from first patch
-        with rasterio.open(train_patches[0]) as src:
-            n_bands = src.count - 1 if src.count == 31 else src.count
+        # Get input channels from first patch using the actual loaded data
+        # This ensures we get the correct number of bands after band selection
+        from data.patch_loader import load_patch_data
+        sample_features, _, _ = load_patch_data(
+            train_patches[0], 
+            supervision_mode='gedi_only',
+            band_selection=self.band_selection,
+            normalize_bands=True
+        )
+        n_bands = sample_features.shape[0]
         
         # Initialize model
         model = ShiftAwareUNet(in_channels=n_bands).to(self.device)

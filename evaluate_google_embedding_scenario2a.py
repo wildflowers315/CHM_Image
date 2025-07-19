@@ -66,7 +66,15 @@ class GoogleEmbeddingEvaluator:
         }
         
     def find_prediction_files(self, predictions_dir, region_id, prediction_type="embedding", max_patches=3):
-        """Find prediction files for a region with dynamic directory detection"""
+        """Find prediction files for a region"""
+        # Map region IDs to region names for subdirectory search
+        # [0] = Google Embedding subdir, [1] = Original MLP subdir
+        region_subdir_map = {
+            '04hf3': ['kochi', '04hf3_kochi'],
+            '05LE4': ['hyogo', '05LE4_hyogo'], 
+            '09gd4': ['tochigi', '09gd4_tochigi']
+        }
+        
         print(f"Looking for {prediction_type} predictions in region {region_id}")
         
         pred_files = []
@@ -82,50 +90,27 @@ class GoogleEmbeddingEvaluator:
             full_pattern = os.path.join(predictions_dir, pattern)
             pred_files.extend(glob.glob(full_pattern))
         
-        # Dynamic subdirectory detection
-        region_name_map = {
-            '04hf3': 'kochi',
-            '05LE4': 'hyogo', 
-            '09gd4': 'tochigi'
-        }
-        
-        region_name = region_name_map.get(region_id, '')
-        
-        # Try different possible subdirectory structures
-        possible_subdirs = [
-            region_name,                    # Scenario 2A: kochi, hyogo, tochigi
-            f"{region_id}_{region_name}",   # Scenario 1: 04hf3_kochi, 05LE4_hyogo, 09gd4_tochigi
-            region_id                       # Direct region ID
-        ]
-        
-        subdir_found = None
-        for subdir in possible_subdirs:
-            subdir_path = os.path.join(predictions_dir, subdir)
-            if os.path.exists(subdir_path):
-                subdir_found = subdir
-                break
-        
-        if subdir_found:
-            subdir = subdir_found
+        # Search in subdirectories - choose the right subdir based on prediction type
+        if region_id in region_subdir_map.keys():
+            if prediction_type == "embedding":
+                subdir = region_subdir_map[region_id][0]  # Use first subdir for Google Embedding
+            else:  # original MLP
+                subdir = region_subdir_map[region_id][1]  # Use second subdir for Original MLP
             
             subdir_path = os.path.join(predictions_dir, subdir)
             print(subdir_path)
             if os.path.exists(subdir_path):
                 # Simple patterns that match any prediction file in the region subdirectory
                 simple_patterns = [
-                    "*mlp_prediction.tif",  # Original Scenario 1 MLP files
-                    "*prediction*.tif",     # General prediction files
-                    "ensemble_*.tif",       # Scenario 2A ensemble files 
-                    "*ensemble*.tif",       # Alternative ensemble pattern
-                    "*.tif"                 # Final fallback - any tif file
+                    "*mlp_prediction.tif",  # Both embedding and original MLP end with this
+                    "*prediction*.tif"      # Backup pattern
                 ]
                 for pattern in simple_patterns:
                     full_pattern = os.path.join(subdir_path, pattern)
                     files_found = glob.glob(full_pattern)
+                    pred_files.extend(files_found)
                     if files_found:
                         print(f"  Found {len(files_found)} files with pattern {pattern}")
-                        pred_files.extend(files_found)
-                        break  # Stop after first successful pattern to avoid duplicates
         
         # Remove duplicates and sort
         pred_files = list(set(pred_files))

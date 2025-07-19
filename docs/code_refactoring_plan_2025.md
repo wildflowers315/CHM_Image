@@ -44,35 +44,46 @@ mkdir -p tmp/ old/ utils/ models/losses models/trainers training/core training/d
 - `predict_with_mosaic.py` → `predict.py` (primary prediction tool)
 - `enhanced_spatial_merger.py` → `utils/spatial_utils.py`
 
-### Phase 2: Modular Architecture Implementation ✅ COMPLETED
+### Phase 2: Modular Architecture Implementation 🔄 IN PROGRESS
 
 #### 2.1 Core Utilities Structure
-```
+```bash
 utils/
-├── __init__.py              # Export EnhancedSpatialMerger
-└── spatial_utils.py         # Spatial processing and mosaicking
+├── __init__.py
+├── spatial_utils.py         # Spatial processing and mosaicking
+├── data_processing_utils.py # Band normalization, pixel extraction, temporal detection
+└── reporting_utils.py       # Saving metrics and importance data
 ```
 
-#### 2.2 Model Architecture Structure  
-```
+#### 2.2 Model Architecture Structure
+```bash
 models/
 ├── losses/
 │   └── __init__.py          # Loss functions for training
 └── trainers/
     ├── __init__.py          # Export all trainers
     ├── rf_trainer.py        # Random Forest trainer
-    ├── mlp_trainer.py       # MLP trainer  
-    ├── unet_2d_trainer.py   # 2D U-Net trainer
-    └── unet_3d_trainer.py   # 3D U-Net trainer
+    ├── mlp_trainer.py       # MLP trainer
+    ├── unet_trainer.py      # 2D U-Net and multi-patch U-Net training
+    └── shift_aware_trainer.py # Shift-aware U-Net training
 ```
 
-#### 2.3 Training System Structure
+#### 2.3 Data Handling Structure
+```bash
+data/
+├── __init__.py
+├── data_loader.py           # Loading patches, training, and prediction data
+├── multi_patch.py           # Multi-patch functionalities
+├── patch_loader.py          # Patch loading utilities
+└── cache_utils.py           # Caching utilities
 ```
-training/
-├── core/                    # Base training infrastructure
-├── data/                    # Data handling and augmentation
-├── models/                  # Model-specific components
-└── workflows/               # High-level training workflows
+
+#### 2.4 Prediction Output Structure
+```bash
+prediction/
+├── __init__.py
+├── prediction_saver.py      # Saving predictions to GeoTIFF
+└── prediction_generator.py  # Generating predictions for single patches
 ```
 
 ### Phase 3: Import System Modernization ✅ COMPLETED
