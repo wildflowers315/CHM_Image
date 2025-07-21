@@ -19,6 +19,7 @@ source chm_env/bin/activate
 ### Key Documentation Files
 - **Training Plan**: Complete implementation guide for all scenarios with performance metrics
 - **Scenario 3 Plan**: Focused implementation plan for Tochigi region GEDI fine-tuning
+- **Visualization System**: `docs/simplified_prediction_visualization_implementation.md` - Production-ready visualization pipeline
 - **HPC Guidelines**: Slurm commands, sinteractive usage, and batch processing tips
 
 ## File Organization Guidelines
@@ -196,6 +197,10 @@ source chm_env/bin/activate
 - `sbatch/train_ensemble_scenario2.sh` - Ensemble training job
 - `sbatch/predict_ensemble_cross_region.sh` - Cross-region prediction job
 - `sbatch/evaluate_ensemble_when_ready.sh` - Ensemble evaluation job
+
+#### **Visualization and Analysis Tools**
+- `create_simplified_prediction_visualizations.py` - Row-layout prediction comparisons with RGB context
+- `sbatch/create_simplified_visualizations.sh` - Batch visualization generation for all regions
 
 ### 📊 **Key Performance Metrics**
 
