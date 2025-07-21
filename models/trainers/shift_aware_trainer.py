@@ -249,11 +249,12 @@ class ShiftAwareUNet(nn.Module):
 class ShiftAwareTrainer:
     """Main trainer class for shift-aware U-Net models"""
     
-    def __init__(self, shift_radius=2, learning_rate=0.0001, batch_size=2, band_selection='all'):
+    def __init__(self, shift_radius=2, learning_rate=0.0001, batch_size=2, band_selection='all', pretrained_model_path=None):
         self.shift_radius = shift_radius
         self.learning_rate = learning_rate
         self.batch_size = batch_size
         self.band_selection = band_selection
+        self.pretrained_model_path = pretrained_model_path
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
     def train(self, train_patches, val_patches, epochs=50, output_dir="chm_outputs/models/shift_aware"):
@@ -295,6 +296,18 @@ class ShiftAwareTrainer:
         
         # Initialize model
         model = ShiftAwareUNet(in_channels=n_bands).to(self.device)
+        
+        # Load pre-trained weights if specified
+        if self.pretrained_model_path and os.path.exists(self.pretrained_model_path):
+            print(f"🔄 Loading pre-trained model from: {self.pretrained_model_path}")
+            try:
+                checkpoint = torch.load(self.pretrained_model_path, map_location=self.device)
+                model.load_state_dict(checkpoint)
+                print("✅ Pre-trained model loaded successfully")
+            except Exception as e:
+                print(f"⚠️  Warning: Could not load pre-trained model: {e}")
+                print("🔄 Starting training from scratch")
+        
         optimizer = optim.Adam(model.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=8, factor=0.5)
         

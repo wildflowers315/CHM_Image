@@ -122,7 +122,8 @@ def train_multi_patch(args):
             shift_radius=args.shift_radius,
             learning_rate=args.learning_rate,
             batch_size=args.batch_size,
-            band_selection=getattr(args, 'band_selection', 'all')
+            band_selection=getattr(args, 'band_selection', 'all'),
+            pretrained_model_path=getattr(args, 'pretrained_model_path', None)
         )
         
         # Train model
@@ -531,6 +532,12 @@ def parse_args():
                        help='Minimum number of valid reference samples per patch (default: 100)')
     # parser.add_argument('--use-augmentation', action='store_true',
     #                    help='Enable data augmentation (12x increase with flips + rotations)')
+    # Pre-trained model support for fine-tuning
+    parser.add_argument('--pretrained-model-path', type=str,
+                       help='Path to pre-trained model for fine-tuning')
+    parser.add_argument('--fine-tune-mode', action='store_true',
+                       help='Enable fine-tuning mode (load pre-trained weights)')
+    
     # Verbose output
     parser.add_argument('--verbose', action='store_true',
                        help='Enable verbose output')
