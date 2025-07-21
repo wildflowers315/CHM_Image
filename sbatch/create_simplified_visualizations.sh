@@ -53,10 +53,10 @@ echo "=" * 70
 echo "🚀 Creating visualizations for all scenarios..."
 # Test with fewer scenarios first to check memory usage
 python create_simplified_prediction_visualizations.py \
-    --scenarios scenario1 scenario1_5 scenario2a scenario3a scenario3b \
+    --scenarios scenario1_original scenario1 scenario1_5 scenario2a \
     --patch-index 12 \
     --output-dir chm_outputs/simplified_prediction_visualizations \
-    --vis-scale 0.7
+    --vis-scale 1
 
 echo ""
 echo "✅ Simplified visualization pipeline completed at $(date)"

@@ -72,9 +72,15 @@ class SimplifiedPredictionVisualizer:
         
         # Default scenario configuration (can be modified)
         self.scenarios = {
+            'scenario1_original': {
+                'name': 'Scenario 1 (30-band)',
+                'subtitle': '(Original MLP)',
+                'path_template': 'chm_outputs/cross_region_predictions/{region_id}_{region}/',
+                'performance': 'R²=0.50*'
+            },
             'scenario1': {
-                'name': 'Scenario 1',
-                'subtitle': '(Reference MLP)',
+                'name': 'Scenario 1 (64-band)', 
+                'subtitle': '(Google Embedding)',
                 'path_template': 'chm_outputs/google_embedding_scenario1_predictions/{region}/',
                 'performance': 'R²=0.87*'
             },
@@ -113,7 +119,12 @@ class SimplifiedPredictionVisualizer:
         if scenario not in self.scenarios:
             return None
             
-        pred_dir = self.scenarios[scenario]['path_template'].format(region=region)
+        # Format path template with region info
+        region_info = self.regions[region]
+        pred_dir = self.scenarios[scenario]['path_template'].format(
+            region=region,
+            region_id=region_info['id']
+        )
         
         if not os.path.exists(pred_dir):
             print(f"⚠️  Directory not found: {pred_dir}")
@@ -336,13 +347,21 @@ class SimplifiedPredictionVisualizer:
         # Get reference path
         ref_path = self.regions[region]['reference_path']
         
-        # Get the first prediction file to use as spatial template
+        # Get the Google Embedding prediction file to use as spatial template (prioritized over original 30-band)
         template_pred_path = None
-        for scenario_key in selected_scenarios:
+        
+        # Priority order: Google Embedding scenarios first, then others
+        priority_scenarios = []
+        embedding_scenarios = [s for s in selected_scenarios if 'embedding' in self.scenarios.get(s, {}).get('path_template', '') or s == 'scenario1']
+        other_scenarios = [s for s in selected_scenarios if s not in embedding_scenarios]
+        priority_scenarios = embedding_scenarios + other_scenarios
+        
+        for scenario_key in priority_scenarios:
             pred_path = self.get_single_prediction_file(scenario_key, region, patch_index)
             if pred_path and os.path.exists(pred_path):
                 template_pred_path = pred_path
-                print(f"📐 Using {os.path.basename(pred_path)} as spatial template")
+                template_type = "Google Embedding" if scenario_key in embedding_scenarios else "Original 30-band"
+                print(f"📐 Using {template_type} template: {os.path.basename(pred_path)}")
                 break
         
         if not template_pred_path:
@@ -581,8 +600,8 @@ def main():
     
     parser = argparse.ArgumentParser(description='Create simplified prediction visualizations')
     parser.add_argument('--scenarios', nargs='+', 
-                       choices=['scenario1', 'scenario1_5', 'scenario2a', 'scenario3a', 'scenario3b'],
-                       default=['scenario1', 'scenario1_5', 'scenario2a', 'scenario3a', 'scenario3b'],
+                       choices=['scenario1_original', 'scenario1', 'scenario1_5', 'scenario2a', 'scenario3a', 'scenario3b'],
+                       default=['scenario1_original', 'scenario1', 'scenario1_5', 'scenario2a', 'scenario3a', 'scenario3b'],
                        help='Scenarios to include in visualization')
     parser.add_argument('--output-dir', default='chm_outputs/simplified_prediction_visualizations',
                        help='Output directory for visualizations')
