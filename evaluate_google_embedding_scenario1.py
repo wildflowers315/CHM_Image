@@ -74,6 +74,7 @@ class GoogleEmbeddingEvaluator:
         # Search in root directory first
         patterns = [
             f"*{region_id}*embedding*prediction*.tif",  # Google Embedding
+            f"*{region_id}*gedi_only_prediction*.tif",  # GEDI-only predictions
             f"*{region_id}*mlp_prediction*.tif",        # Original MLP
             f"*{region_id}*pred*.tif"                   # General
         ]
@@ -113,11 +114,12 @@ class GoogleEmbeddingEvaluator:
             if os.path.exists(subdir_path):
                 # Simple patterns that match any prediction file in the region subdirectory
                 simple_patterns = [
-                    "*mlp_prediction.tif",  # Original Scenario 1 MLP files
-                    "*prediction*.tif",     # General prediction files
-                    "ensemble_*.tif",       # Scenario 2A ensemble files 
-                    "*ensemble*.tif",       # Alternative ensemble pattern
-                    "*.tif"                 # Final fallback - any tif file
+                    "*gedi_only_prediction.tif",  # GEDI-only prediction files (Scenario 1.5)
+                    "*mlp_prediction.tif",        # Original Scenario 1 MLP files
+                    "*prediction*.tif",           # General prediction files
+                    "ensemble_*.tif",             # Scenario 2A ensemble files 
+                    "*ensemble*.tif",             # Alternative ensemble pattern
+                    "*.tif"                       # Final fallback - any tif file
                 ]
                 for pattern in simple_patterns:
                     full_pattern = os.path.join(subdir_path, pattern)
@@ -465,9 +467,9 @@ def main():
         del embedding_data
         gc.collect()
     
-    # Evaluate Original 30-band MLP (if available)
+    # Evaluate Original 30-band MLP (if available and provided)
     original_results, original_data = [], {}
-    if os.path.exists(args.original_mlp_dir):
+    if args.original_mlp_dir and args.original_mlp_dir.strip() and os.path.exists(args.original_mlp_dir):
         print("\n=== Original 30-band MLP Evaluation ===")
         original_results, original_data = evaluator.evaluate_scenario(
             "Original Satellite (30-band)",
@@ -476,8 +478,10 @@ def main():
             prediction_type="mlp",
             max_patches=args.max_patches
         )
-    else:
+    elif args.original_mlp_dir and args.original_mlp_dir.strip():
         print(f"\n⚠️  Original MLP directory not found: {args.original_mlp_dir}")
+    else:
+        print("\n📊 Evaluating single scenario only (no comparison baseline provided)")
     
 
     if original_data:

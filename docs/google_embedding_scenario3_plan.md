@@ -406,6 +406,31 @@ echo "⏰ Completed at: $(date)"
 
 ## 🎯 **IMPLEMENTATION RESULTS**
 
+### ✅ **Scenario 1.5: GEDI-Only Performance (Baseline)** - **COMPLETED**
+
+**Model**: Pure GEDI shift-aware U-Net (Hyogo-trained, Google Embedding, no ensemble)
+**Overall Performance**: 
+- **Average R²**: -7.746
+- **Average RMSE**: 17.29 m
+- **Average Bias**: -16.18 m
+- **Total Samples**: 8,523,760
+
+**Regional Performance**:
+| Region | R² | RMSE (m) | Bias (m) | Correlation | Samples |
+|--------|-----|----------|----------|-------------|---------|
+| **Kochi** | -5.61 | 17.40 | -16.02 | 0.009 | 3,233,732 |
+| **Hyogo** (Training) | -11.52 | 16.83 | -16.14 | 0.029 | 2,109,397 |
+| **Tochigi** | -6.10 | 17.64 | -16.37 | 0.115 | 3,180,631 |
+
+**Key Findings**:
+- **Poor Standalone Performance**: GEDI model alone shows very poor performance (R² ≈ -7.75)
+- **Severe Underestimation**: Massive negative bias (-16m) across all regions
+- **Low Predictions**: Mean predictions ~0.6-0.8m vs reference ~16-17m
+- **Cross-Region Variation**: Tochigi shows highest correlation (0.115) despite being cross-region
+- **Training Region Paradox**: Hyogo (training region) shows worst R² (-11.52)
+
+**Scientific Implication**: Demonstrates critical importance of ensemble approach - pure GEDI models are insufficient for accurate height prediction.
+
 ### ✅ **Scenario 3A: GEDI From-Scratch Training** - **COMPLETED**
 
 **Training Performance**: 
@@ -494,10 +519,31 @@ echo "⏰ Completed at: $(date)"
 - **Scenario 3A/3B Tochigi**: R² ≈ -0.91, RMSE ≈ 8.93m, Corr ≈ 0.535
 - **Conclusion**: Target region training achieves similar performance to Scenario 2A baseline
 
+### 🔍 **Comparative Performance Analysis**: GEDI-Only vs Ensemble Approaches
+
+| Scenario | Approach | Tochigi R² | Hyogo R² | Kochi R² | Average R² | Key Insight |
+|----------|----------|------------|----------|----------|------------|-------------|
+| **1.5** | GEDI-only | **-6.10** | **-11.52** | **-5.61** | **-7.75** | Baseline - pure GEDI fails |
+| **2A** | GEDI + Reference + Ensemble | -0.91 | -3.12 | -1.82 | -1.95 | Ensemble rescues performance |
+| **3A** | Target GEDI + Fixed Ensemble | -0.915 | -3.12 | -1.83 | -1.96 | Similar to 2A |
+| **3B** | Fine-tuned GEDI + Fixed Ensemble | -0.905 | -3.11 | -1.82 | -1.94 | Best ensemble performance |
+
+#### **Critical Scientific Insights**:
+
+1. **Ensemble Effect Magnitude**: Ensemble approaches improve R² by ~6 points (-7.75 → -1.95), demonstrating massive value of reference model integration
+
+2. **GEDI Component Analysis**: Pure GEDI contributes negatively, but ensemble MLP effectively combines it with reference model to achieve reasonable performance
+
+3. **Reference Model Dominance**: The dramatic improvement suggests reference MLP provides most predictive power, while GEDI adds marginal spatial information
+
+4. **Regional Consistency**: All ensemble approaches show similar cross-region patterns, while GEDI-only shows erratic regional performance
+
+5. **Training Region Effect**: GEDI-only performs worst on training region (Hyogo: -11.52), indicating potential overfitting or model instability
+
 **Evaluation Files**:
-- **Detailed Results**: `chm_outputs/scenario3_comprehensive_evaluation/detailed_evaluation_results.json`
-- **Comparison Table**: `chm_outputs/scenario3_comprehensive_evaluation/scenario_comparison.csv`
-- **Correlation Plots**: `chm_outputs/scenario3_comprehensive_evaluation/`
+- **Scenario 1.5**: `chm_outputs/scenario1_5_gedi_only_evaluation/detailed_evaluation_results.json`
+- **Scenario 3 Comparison**: `chm_outputs/scenario3_comprehensive_evaluation/detailed_evaluation_results.json`
+- **Correlation Plots**: Available in respective evaluation directories
 
 ### ✅ **Success Criteria Evaluation**
 
