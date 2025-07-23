@@ -119,7 +119,7 @@ def parse_args():
     parser.add_argument('--start-date', type=str, default='01-01', help='Start date (MM-DD)')
     parser.add_argument('--end-date', type=str, default='12-31', help='End date (MM-DD)')
     parser.add_argument('--clouds-th', type=float, default=65, help='Cloud threshold')
-    parser.add_argument('--scale', type=int, default=30, help='Output resolution in meters')
+    parser.add_argument('--scale', type=int, default=10, help='Output resolution in meters')
     parser.add_argument('--mask-type', type=str, default='NDVI',
                        choices=['DW', 'FNF', 'NDVI', 'WC', 'CHM', 'ALL', 'none'],
                        help='Type of forest mask to apply')

@@ -242,5 +242,83 @@ def integrate_enhanced_merger():
     """Integration function to replace the existing PredictionMerger with enhanced version."""
     return EnhancedSpatialMerger
 
+def sample_raster_at_coordinates(raster_path: str, lons: np.ndarray, lats: np.ndarray, 
+                                band: int = 1) -> np.ndarray:
+    """
+    Sample raster values at given longitude/latitude coordinates using vectorized operations.
+    
+    Args:
+        raster_path: Path to raster file
+        lons: Array of longitude values
+        lats: Array of latitude values  
+        band: Raster band to sample (default: 1)
+        
+    Returns:
+        Array of sampled values (NaN for points outside raster or nodata)
+    """
+    with rasterio.open(raster_path) as src:
+        print(f"  Raster CRS: {src.crs}, Shape: {src.shape}, Bounds: {src.bounds}")
+        
+        # Convert coordinates to raster CRS if needed
+        if src.crs.to_epsg() != 4326:
+            from rasterio.warp import transform
+            xs, ys = transform('EPSG:4326', src.crs, lons, lats)
+        else:
+            xs, ys = lons, lats
+        
+        # Convert to numpy arrays for vectorized operations
+        xs = np.array(xs)
+        ys = np.array(ys)
+        
+        # Convert coordinates to pixel indices using vectorized operations
+        # Handle coordinate conversion manually for arrays
+        transform = src.transform
+        rows = []
+        cols = []
+        from tqdm import tqdm
+        for x, y in tqdm(zip(xs, ys), total=len(xs), desc="Sampling raster"):
+            try:
+                row, col = src.index(x, y)
+                rows.append(row)
+                cols.append(col)
+            except:
+                rows.append(-1)  # Invalid coordinates
+                cols.append(-1)
+        
+        rows = np.array(rows)
+        cols = np.array(cols)
+        
+        # Read the entire raster band once
+        print(f"  Reading raster data...")
+        raster_data = src.read(band)
+        
+        # Initialize output array with NaN
+        sampled_values = np.full(len(xs), np.nan, dtype=np.float64)
+        
+        # Find valid pixel coordinates (within bounds)
+        valid_mask = (
+            (rows >= 0) & (rows < src.height) & 
+            (cols >= 0) & (cols < src.width)
+        )
+        
+        if np.any(valid_mask):
+            # Sample values for valid coordinates
+            valid_rows = rows[valid_mask]
+            valid_cols = cols[valid_mask]
+            values = raster_data[valid_rows, valid_cols]
+            
+            # Handle nodata values
+            if src.nodata is not None:
+                nodata_mask = values != src.nodata
+                values = np.where(nodata_mask, values, np.nan)
+            
+            # Assign sampled values back to the result array
+            sampled_values[valid_mask] = values.astype(np.float64)
+        
+        valid_count = np.sum(~np.isnan(sampled_values))
+        print(f"  Sampled {valid_count}/{len(sampled_values)} points successfully")
+        
+        return sampled_values
+
 # Export for use in train_predict_map.py
-__all__ = ['EnhancedSpatialMerger', 'integrate_enhanced_merger']
+__all__ = ['EnhancedSpatialMerger', 'integrate_enhanced_merger', 'sample_raster_at_coordinates']
