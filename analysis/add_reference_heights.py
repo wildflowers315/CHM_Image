@@ -24,15 +24,15 @@ from utils.spatial_utils import sample_raster_at_coordinates
 def extract_area_code(csv_filename: str) -> str:
     """Extract area code from CSV filename (e.g., dchm_04hf3 from filename)."""
     # Look for pattern like dchm_04hf3, dchm_05LE4, dchm_09gd4
-    parts = csv_filename.lower().split('_')
+    parts = csv_filename.split('_')
     for i, part in enumerate(parts):
         if part.startswith('dchm') and i + 1 < len(parts):
             return f"{part}_{parts[i+1]}"
     
     # Fallback: look for known area codes
-    area_codes = ['dchm_04hf3', 'dchm_05le4', 'dchm_09gd4']
+    area_codes = ['dchm_04hf3', 'dchm_05LE4', 'dchm_09gd4']
     for code in area_codes:
-        if code in csv_filename.lower():
+        if code in csv_filename:
             return code
     
     raise ValueError(f"Could not extract area code from filename: {csv_filename}")

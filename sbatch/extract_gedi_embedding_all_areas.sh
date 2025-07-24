@@ -17,7 +17,7 @@ source chm_env/bin/activate
 YEAR=2022
 
 # Set buffer size (5km = 5000m)
-BUFFER=1
+BUFFER=-5000
 
 # Define the three areas with their corresponding GeoJSON files
 AREAS=(
