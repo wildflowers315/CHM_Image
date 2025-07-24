@@ -106,14 +106,23 @@ class EnsemblePredictor:
                 model.load_state_dict(checkpoint)
         elif self.gedi_model_type == 'mlp':
             sys.path.append('.')
-            from train_production_mlp import AdvancedReferenceHeightMLP
-            input_dim = np.sum(checkpoint['selected_features']) if 'selected_features' in checkpoint else 30
-            model = AdvancedReferenceHeightMLP(
-                input_dim=input_dim,
-                hidden_dims=[1024, 512, 256, 128, 64],
-                dropout_rate=0.3,
-                use_residuals=False
-            ).to(self.device)
+            # Determine if this is a GEDI pixel model or regular MLP
+            if 'gedi_pixel' in model_path.lower() or 'scenario4' in model_path.lower():
+                from train_gedi_pixel_mlp_scenario4 import AdvancedGEDIMLP
+                input_dim = checkpoint.get('input_features', 64)  # GEDI pixel models use 64 embedding features
+                model = AdvancedGEDIMLP(input_dim=input_dim).to(self.device)
+                print(f"Loading GEDI pixel MLP model with {input_dim} input features")
+            else:
+                from train_production_mlp import AdvancedReferenceHeightMLP
+                input_dim = np.sum(checkpoint['selected_features']) if 'selected_features' in checkpoint else 30
+                model = AdvancedReferenceHeightMLP(
+                    input_dim=input_dim,
+                    hidden_dims=[1024, 512, 256, 128, 64],
+                    dropout_rate=0.3,
+                    use_residuals=False
+                ).to(self.device)
+                print(f"Loading reference MLP model with {input_dim} input features")
+                
             if 'model_state_dict' in checkpoint:
                 model.load_state_dict(checkpoint['model_state_dict'])
             else:

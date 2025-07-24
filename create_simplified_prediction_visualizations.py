@@ -113,6 +113,12 @@ class SimplifiedPredictionVisualizer:
                 'subtitle': '(GEDI Pixel)',
                 'path_template': 'chm_outputs/gedi_pixel_scenario4_predictions/{region}/',
                 'performance': 'R²=0.13'
+            },
+            'scenario5': {
+                'name': 'Scenario 5',
+                'subtitle': '(GEDI Ensemble)', 
+                'path_template': 'chm_outputs/gedi_scenario5_predictions/{region}/',
+                'performance': 'R²=0.78'
             }
         }
         
@@ -606,8 +612,8 @@ def main():
     
     parser = argparse.ArgumentParser(description='Create simplified prediction visualizations')
     parser.add_argument('--scenarios', nargs='+', 
-                       choices=['scenario1_original', 'scenario1', 'scenario1_5', 'scenario2a', 'scenario3a', 'scenario3b', 'scenario4'],
-                       default=['scenario1_original', 'scenario1', 'scenario1_5', 'scenario2a', 'scenario4'],
+                       choices=['scenario1_original', 'scenario1', 'scenario1_5', 'scenario2a', 'scenario3a', 'scenario3b', 'scenario4', 'scenario5'],
+                       default=['scenario1_original', 'scenario1', 'scenario1_5', 'scenario4', 'scenario5'],
                        help='Scenarios to include in visualization')
     parser.add_argument('--output-dir', default='chm_outputs/simplified_prediction_visualizations',
                        help='Output directory for visualizations')

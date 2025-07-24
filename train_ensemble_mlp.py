@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Training script for ensemble MLP combining GEDI and production MLP models
-Scenario 2: Reference + GEDI Training (No Target Adaptation)
+Supports both:
+- Scenario 2: Reference + GEDI U-Net Ensemble (Original)
+- Scenario 5: Reference + GEDI Pixel MLP Ensemble (New)
 """
 
 import os
@@ -90,9 +92,16 @@ class EnsembleDataset(Dataset):
             checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
 
         if model_type == 'mlp':
-            from train_production_mlp import AdvancedReferenceHeightMLP
-            input_dim = checkpoint.get('input_features', np.sum(checkpoint['selected_features']))
-            model = AdvancedReferenceHeightMLP(input_dim=input_dim).to(self.device)
+            # Determine if this is a GEDI pixel model or reference model
+            if 'gedi_pixel' in model_path.lower() or 'scenario4' in model_path.lower():
+                from train_gedi_pixel_mlp_scenario4 import AdvancedGEDIMLP
+                input_dim = checkpoint.get('input_features', 64)  # GEDI pixel models use 64 embedding features
+                model = AdvancedGEDIMLP(input_dim=input_dim).to(self.device)
+            else:
+                from train_production_mlp import AdvancedReferenceHeightMLP
+                input_dim = checkpoint.get('input_features', np.sum(checkpoint['selected_features']))
+                model = AdvancedReferenceHeightMLP(input_dim=input_dim).to(self.device)
+            
             model.load_state_dict(checkpoint['model_state_dict'])
             scaler = checkpoint.get('scaler')
             feature_selector = checkpoint.get('selected_features')
@@ -312,16 +321,16 @@ def train_ensemble_model(dataset, model, device, epochs=100, batch_size=1024, le
 
 def main():
     parser = argparse.ArgumentParser(description='Train ensemble MLP for Scenario 2')
-    parser.add_argument('--gedi-model-path', default='chm_outputs/scenario2_gedi_shift_aware/gedi_model_filtered.pth',
-                       help='Path to trained GEDI model')
-    parser.add_argument('--reference-model-path', default='chm_outputs/production_mlp_best.pth',
-                       help='Path to production MLP model')
+    parser.add_argument('--gedi-model-path', default='chm_outputs/gedi_pixel_mlp_scenario4/gedi_pixel_mlp_scenario4_embedding_best.pth',
+                       help='Path to trained GEDI model (supports both U-Net and MLP models)')
+    parser.add_argument('--reference-model-path', default='chm_outputs/production_mlp_reference_embedding_best.pth',
+                       help='Path to production MLP model (Google Embedding Scenario 1)')
     parser.add_argument('--patch-dir', default='chm_outputs/enhanced_patches/',
                        help='Directory containing enhanced patches')
     parser.add_argument('--patch-pattern', default='*05LE4*', help='Pattern to match patch files')
     parser.add_argument('--reference-height-path', default='downloads/dchm_05LE4.tif',
                        help='Reference height TIF file')
-    parser.add_argument('--output-dir', default='chm_outputs/scenario2_ensemble_mlp',
+    parser.add_argument('--output-dir', default='chm_outputs/gedi_scenario5_ensemble',
                        help='Output directory')
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
     parser.add_argument('--batch-size', type=int, default=1024, help='Batch size')
@@ -339,7 +348,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    print("🚀 Ensemble MLP Training - Scenario 2")
+    print("🚀 Ensemble MLP Training - Scenario 5 (Reference + GEDI Pixel)")
     print(f"📅 Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"🖥️  Device: {device}")
     print(f"🧠 Model type: {args.model_type}")
@@ -382,11 +391,14 @@ def main():
         
         # Save training info
         training_info = {
+            'scenario': 'Scenario 5: Reference + GEDI Pixel Ensemble',
             'ensemble_type': args.model_type,
             'best_val_r2': float(best_r2),
             'total_samples': len(dataset),
             'gedi_model_path': args.gedi_model_path,
-            'mlp_model_path': args.reference_model_path,
+            'gedi_model_type': args.gedi_model_type,
+            'reference_model_path': args.reference_model_path,
+            'band_selection': args.band_selection,
             'training_date': datetime.now().isoformat()
         }
         
