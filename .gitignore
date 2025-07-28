@@ -62,8 +62,9 @@ integrated_test/*
 
 logs/*
 
-
-
+old/*
+old*
+old/**/*
 
 
 
