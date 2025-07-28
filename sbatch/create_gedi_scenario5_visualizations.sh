@@ -2,7 +2,7 @@
 #SBATCH --job-name=gedi_s5_vis
 #SBATCH --output=logs/%j_gedi_scenario5_visualizations.txt  
 #SBATCH --error=logs/%j_gedi_scenario5_visualizations_error.txt
-#SBATCH --time=0-1:00:00
+#SBATCH --time=0-12:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
@@ -48,11 +48,22 @@ echo "=" * 70
 
 # Run comprehensive visualization with all scenarios including new Scenario 5
 echo "🚀 Creating comprehensive visualization with GEDI Scenario 5 ensemble..."
-python create_simplified_prediction_visualizations.py \
-    --scenarios scenario1 scenario4 scenario5 \
-    --patch-index 12 \
-    --output-dir chm_outputs/gedi_scenario5_visualizations \
-    --vis-scale 1
+# python create_simplified_prediction_visualizations.py \
+#     --scenarios scenario1_original scenario1 scenario4 scenario5 \
+#     --patch-index 12 \
+#     --output-dir chm_outputs/gedi_scenario5_visualizations \
+#     --vis-scale 1
+
+for PATCH_INDEX in {0..63}; do
+    echo "  ▶️  Processing patch index $PATCH_INDEX"
+    python create_simplified_prediction_visualizations.py \
+        --scenarios scenario1 scenario4 scenario5 scenario1_original ch_pauls2024 ch_tolan2024 ch_lang2022 ch_potapov2021 \
+        --patch-index $PATCH_INDEX \
+        --output-dir chm_outputs/gedi_scenario5_visualizations \
+        --vis-scale 1
+    echo "  ✅ Patch $PATCH_INDEX completed"
+    echo ""
+done
 
 echo ""
 echo "✅ GEDI Scenario 5 ensemble visualization pipeline completed at $(date)"

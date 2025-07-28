@@ -13,6 +13,7 @@ import rasterio
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import random
+from utils.band_utils import get_band_info, find_band_by_name, extract_bands_by_name
 
 # Try to import Earth Engine with graceful fallback
 try:
@@ -119,6 +120,39 @@ class SimplifiedPredictionVisualizer:
                 'subtitle': '(GEDI Ensemble)', 
                 'path_template': 'chm_outputs/gedi_scenario5_predictions/{region}/',
                 'performance': 'R²=0.78'
+            },
+            # Global height products from embedding patches
+            'ch_pauls2024': {
+                'name': 'Pauls 2024',
+                'subtitle': '(Global Product)',
+                'path_template': 'chm_outputs/*{region_id}*embedding*.tif',
+                'performance': 'Global',
+                'is_global_product': True,
+                'band_name': 'ch_pauls2024'
+            },
+            'ch_tolan2024': {
+                'name': 'Tolan 2024',
+                'subtitle': '(Global Product)',
+                'path_template': 'chm_outputs/*{region_id}*embedding*.tif',
+                'performance': 'Global',
+                'is_global_product': True,
+                'band_name': 'ch_tolan2024'
+            },
+            'ch_lang2022': {
+                'name': 'Lang 2022',
+                'subtitle': '(Global Product)',
+                'path_template': 'chm_outputs/*{region_id}*embedding*.tif',
+                'performance': 'Global',
+                'is_global_product': True,
+                'band_name': 'ch_lang2022'
+            },
+            'ch_potapov2021': {
+                'name': 'Potapov 2021',
+                'subtitle': '(Global Product)',
+                'path_template': 'chm_outputs/*{region_id}*embedding*.tif',
+                'performance': 'Global',
+                'is_global_product': True,
+                'band_name': 'ch_potapov2021'
             }
         }
         
@@ -131,24 +165,33 @@ class SimplifiedPredictionVisualizer:
         if scenario not in self.scenarios:
             return None
             
-        # Format path template with region info
+        # Check if this is a global product scenario first
+        scenario_info = self.scenarios[scenario]
         region_info = self.regions[region]
-        pred_dir = self.scenarios[scenario]['path_template'].format(
-            region=region,
-            region_id=region_info['id']
-        )
         
-        if not os.path.exists(pred_dir):
-            print(f"⚠️  Directory not found: {pred_dir}")
-            return None
-        
-        # Search patterns in preference order
-        patterns = [
-            f"{pred_dir}*gedi_only_prediction*.tif",   # GEDI-only files (Scenario 1.5)
-            f"{pred_dir}*prediction*.tif",             # Standard prediction files
-            f"{pred_dir}*ensemble*.tif",               # Ensemble files  
-            f"{pred_dir}*.tif"                         # Any TIF file
-        ]
+        if scenario_info.get('is_global_product', False):
+            # For global products, search for embedding TIF files directly in chm_outputs directory
+            # Use correct pattern for direct embedding files in chm_outputs
+            embedding_pattern = f"chm_outputs/dchm_{region_info['id']}_embedding_*.tif"
+            patterns = [embedding_pattern]
+        else:
+            # Format path template with region info for regular scenarios
+            pred_dir = scenario_info['path_template'].format(
+                region=region,
+                region_id=region_info['id']
+            )
+            
+            if not os.path.exists(pred_dir):
+                print(f"⚠️  Directory not found: {pred_dir}")
+                return None
+            
+            # Search patterns in preference order for prediction files
+            patterns = [
+                f"{pred_dir}*gedi_only_prediction*.tif",   # GEDI-only files (Scenario 1.5)
+                f"{pred_dir}*prediction*.tif",             # Standard prediction files
+                f"{pred_dir}*ensemble*.tif",               # Ensemble files  
+                f"{pred_dir}*.tif"                         # Any TIF file
+            ]
         
         all_files = []
         for pattern in patterns:
@@ -342,6 +385,39 @@ class SimplifiedPredictionVisualizer:
             
             return data, metadata
     
+    def load_global_product_data(self, embedding_file: str, band_name: str, ref_path: str) -> Tuple[np.ndarray, dict]:
+        """Load global height product data from embedding TIF file"""
+        try:
+            # Find the band index for the global product
+            band_idx = find_band_by_name(embedding_file, band_name)
+            if band_idx is None:
+                print(f"⚠️  Band {band_name} not found in {embedding_file}")
+                return None, None
+            
+            # Read the specific band
+            with rasterio.open(embedding_file) as src:
+                # Read the global product band (1-based indexing for rasterio)
+                global_data = src.read(band_idx + 1)
+                
+                # Get metadata
+                metadata = {
+                    'transform': src.transform,
+                    'shape': global_data.shape,
+                    'bounds': src.bounds,
+                    'crs': src.crs
+                }
+            
+            # Apply basic filtering (same as other height data)
+            global_data = np.where((global_data > 0) & (global_data <= 100) & ~np.isnan(global_data), 
+                                 global_data, np.nan)
+            
+            print(f"    Loaded {band_name} from {os.path.basename(embedding_file)}, shape: {global_data.shape}")
+            return global_data, metadata
+            
+        except Exception as e:
+            print(f"❌ Error loading global product {band_name}: {e}")
+            return None, None
+    
     def create_region_visualization(self, region: str, selected_scenarios: List[str] = None, patch_index: int = None) -> str:
         """Create row visualization for a region"""
         if selected_scenarios is None:
@@ -422,11 +498,27 @@ class SimplifiedPredictionVisualizer:
         include_rgb = self.ee_initialized
         n_panels = (1 if include_rgb else 0) + 1 + len(selected_scenarios)  # [RGB] + Reference + scenarios
         
-        # Create figure with optimized layout for consistent image sizes
-        fig_width = 4 * n_panels + 1  # Extra space for rightmost colorbar
-        fig, axes = plt.subplots(1, n_panels, figsize=(fig_width, 6))
-        if n_panels == 1:
-            axes = [axes]
+        # Determine if we need two rows (when more than 5 panels)
+        use_two_rows = n_panels > 5
+        
+        if use_two_rows:
+            # Two-row layout
+            n_cols = min(5, n_panels)  # Max 5 columns
+            n_rows = 2
+            fig_width = 4 * n_cols + 1
+            fig_height = 4 * n_rows + 2
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, fig_height))
+            axes = axes.flatten()  # Flatten for easier indexing
+            
+            # Hide unused subplots in the second row
+            for i in range(n_panels, len(axes)):
+                axes[i].set_visible(False)
+        else:
+            # Single-row layout
+            fig_width = 4 * n_panels + 1  # Extra space for rightmost colorbar
+            fig, axes = plt.subplots(1, n_panels, figsize=(fig_width, 6))
+            if n_panels == 1:
+                axes = [axes]
         
         panel_idx = 0
         
@@ -490,55 +582,113 @@ class SimplifiedPredictionVisualizer:
                 break
                 
             scenario_info = self.scenarios[scenario_key]
-            pred_path = self.get_single_prediction_file(scenario_key, region, patch_index)
             
-            if pred_path and os.path.exists(pred_path):
-                try:
-                    # Load this prediction aligned to the template
-                    pred_data, _, pred_metadata = self.load_and_align_rasters_for_visualization(pred_path, ref_path)
-                    
-                    if pred_data is not None:
-                        # Apply visualization scaling to prediction data
-                        scaled_pred_data = pred_data * self.vis_scale
-                        
-                        # Use same colormap as reference for consistency
-                        axes[panel_idx].imshow(
-                            scaled_pred_data,
-                            cmap='plasma',  # Same as reference
-                            vmin=height_vmin,
-                            vmax=height_vmax,
-                            extent=[0, 256, 0, 256],  # Fixed 256×256 display extent
-                            aspect='equal'
+            # Handle global products differently
+            if scenario_info.get('is_global_product', False):
+                # For global products, load from embedding TIF files
+                embedding_path = self.get_single_prediction_file(scenario_key, region, patch_index)
+                
+                if embedding_path and os.path.exists(embedding_path):
+                    try:
+                        # Load the global product band from the embedding file
+                        global_data, global_metadata = self.load_global_product_data(
+                            embedding_path, scenario_info['band_name'], ref_path
                         )
                         
-                        # Title with performance and scaling info
-                        if self.vis_scale != 1.0:
-                            scale_info = f"\n(scaled {self.vis_scale}x)"
-                            title = f"{scenario_info['name']}\n{scenario_info['subtitle']}\n{scenario_info['performance']}{scale_info}"
+                        if global_data is not None:
+                            # Apply visualization scaling to global product data
+                            scaled_global_data = global_data * self.vis_scale
+                            
+                            # Use same colormap as reference for consistency
+                            axes[panel_idx].imshow(
+                                scaled_global_data,
+                                cmap='plasma',  # Same as reference
+                                vmin=height_vmin,
+                                vmax=height_vmax,
+                                extent=[0, 256, 0, 256],  # Fixed 256×256 display extent
+                                aspect='equal'
+                            )
+                            
+                            # Title with performance and scaling info
+                            if self.vis_scale != 1.0:
+                                scale_info = f"\n(scaled {self.vis_scale}x)"
+                                title = f"{scenario_info['name']}\n{scenario_info['subtitle']}\n{scenario_info['performance']}{scale_info}"
+                            else:
+                                title = f"{scenario_info['name']}\n{scenario_info['subtitle']}\n{scenario_info['performance']}"
+                            axes[panel_idx].set_title(title, fontweight='bold', fontsize=9)
                         else:
-                            title = f"{scenario_info['name']}\n{scenario_info['subtitle']}\n{scenario_info['performance']}"
-                        axes[panel_idx].set_title(title, fontweight='bold', fontsize=9)
-                    else:
-                        print(f"⚠️  Failed to align {scenario_key}")
-                        axes[panel_idx].text(0.5, 0.5, f'{scenario_info["name"]}\nAlignment\nFailed',
+                            print(f"⚠️  Failed to load global product {scenario_key}")
+                            axes[panel_idx].text(0.5, 0.5, f'{scenario_info["name"]}\nLoad\nFailed',
+                                               ha='center', va='center', transform=axes[panel_idx].transAxes,
+                                               fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcoral", alpha=0.7))
+                            title = f"{scenario_info['name']}\n{scenario_info['subtitle']}"
+                            axes[panel_idx].set_title(title, fontweight='bold', fontsize=10)
+                        
+                    except Exception as e:
+                        print(f"⚠️  Could not load global product {scenario_key}: {e}")
+                        axes[panel_idx].text(0.5, 0.5, f'{scenario_info["name"]}\nError',
                                            ha='center', va='center', transform=axes[panel_idx].transAxes,
                                            fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcoral", alpha=0.7))
                         title = f"{scenario_info['name']}\n{scenario_info['subtitle']}"
                         axes[panel_idx].set_title(title, fontweight='bold', fontsize=10)
-                    
-                except Exception as e:
-                    print(f"⚠️  Could not load {scenario_key}: {e}")
-                    axes[panel_idx].text(0.5, 0.5, f'{scenario_info["name"]}\nError',
+                else:
+                    axes[panel_idx].text(0.5, 0.5, f'{scenario_info["name"]}\nUnavailable',
                                        ha='center', va='center', transform=axes[panel_idx].transAxes,
-                                       fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcoral", alpha=0.7))
+                                       fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.7))
                     title = f"{scenario_info['name']}\n{scenario_info['subtitle']}"
                     axes[panel_idx].set_title(title, fontweight='bold', fontsize=10)
+            
             else:
-                axes[panel_idx].text(0.5, 0.5, f'{scenario_info["name"]}\nUnavailable',
-                                   ha='center', va='center', transform=axes[panel_idx].transAxes,
-                                   fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.7))
-                title = f"{scenario_info['name']}\n{scenario_info['subtitle']}"
-                axes[panel_idx].set_title(title, fontweight='bold', fontsize=10)
+                # Handle regular prediction scenarios
+                pred_path = self.get_single_prediction_file(scenario_key, region, patch_index)
+                
+                if pred_path and os.path.exists(pred_path):
+                    try:
+                        # Load this prediction aligned to the template
+                        pred_data, _, pred_metadata = self.load_and_align_rasters_for_visualization(pred_path, ref_path)
+                        
+                        if pred_data is not None:
+                            # Apply visualization scaling to prediction data
+                            scaled_pred_data = pred_data * self.vis_scale
+                            
+                            # Use same colormap as reference for consistency
+                            axes[panel_idx].imshow(
+                                scaled_pred_data,
+                                cmap='plasma',  # Same as reference
+                                vmin=height_vmin,
+                                vmax=height_vmax,
+                                extent=[0, 256, 0, 256],  # Fixed 256×256 display extent
+                                aspect='equal'
+                            )
+                            
+                            # Title with performance and scaling info
+                            if self.vis_scale != 1.0:
+                                scale_info = f"\n(scaled {self.vis_scale}x)"
+                                title = f"{scenario_info['name']}\n{scenario_info['subtitle']}\n{scenario_info['performance']}{scale_info}"
+                            else:
+                                title = f"{scenario_info['name']}\n{scenario_info['subtitle']}\n{scenario_info['performance']}"
+                            axes[panel_idx].set_title(title, fontweight='bold', fontsize=9)
+                        else:
+                            print(f"⚠️  Failed to align {scenario_key}")
+                            axes[panel_idx].text(0.5, 0.5, f'{scenario_info["name"]}\nAlignment\nFailed',
+                                               ha='center', va='center', transform=axes[panel_idx].transAxes,
+                                               fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcoral", alpha=0.7))
+                            title = f"{scenario_info['name']}\n{scenario_info['subtitle']}"
+                            axes[panel_idx].set_title(title, fontweight='bold', fontsize=10)
+                        
+                    except Exception as e:
+                        print(f"⚠️  Could not load {scenario_key}: {e}")
+                        axes[panel_idx].text(0.5, 0.5, f'{scenario_info["name"]}\nError',
+                                           ha='center', va='center', transform=axes[panel_idx].transAxes,
+                                           fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcoral", alpha=0.7))
+                        title = f"{scenario_info['name']}\n{scenario_info['subtitle']}"
+                        axes[panel_idx].set_title(title, fontweight='bold', fontsize=10)
+                else:
+                    axes[panel_idx].text(0.5, 0.5, f'{scenario_info["name"]}\nUnavailable',
+                                       ha='center', va='center', transform=axes[panel_idx].transAxes,
+                                       fontsize=10, bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.7))
+                    title = f"{scenario_info['name']}\n{scenario_info['subtitle']}"
+                    axes[panel_idx].set_title(title, fontweight='bold', fontsize=10)
             
             axes[panel_idx].set_xticks([])
             axes[panel_idx].set_yticks([])
@@ -546,20 +696,30 @@ class SimplifiedPredictionVisualizer:
         
         # Add shared colorbar at the rightmost position
         # Create space for colorbar by adjusting subplot parameters
-        plt.subplots_adjust(right=0.85, top=0.85)
+        if use_two_rows:
+            plt.subplots_adjust(right=0.85, top=0.90, bottom=0.10)
+            # Add shared colorbar spanning the rightmost area for two-row layout
+            cbar_ax = fig.add_axes([0.87, 0.15, 0.02, 0.7])  # Taller for two rows
+        else:
+            plt.subplots_adjust(right=0.85, top=0.85)
+            # Add shared colorbar spanning the rightmost area for single-row layout
+            cbar_ax = fig.add_axes([0.87, 0.15, 0.02, 0.6])  # [left, bottom, width, height]
         
-        # Add shared colorbar spanning the rightmost area
-        cbar_ax = fig.add_axes([0.87, 0.15, 0.02, 0.6])  # [left, bottom, width, height]
         cbar = plt.colorbar(shared_colorbar_image, cax=cbar_ax)
         cbar.set_label('Height (m)', rotation=270, labelpad=20, fontsize=12)
         cbar.ax.tick_params(labelsize=10)
         
         # Overall title
-        fig.suptitle(f'{self.regions[region]["name"]}: Multi-Scenario Canopy Height Predictions',
-                    fontsize=16, fontweight='bold', y=0.95)
-        
-        # Apply tight layout to image panels only (not colorbar)
-        plt.tight_layout(rect=[0, 0, 0.85, 0.95])
+        if use_two_rows:
+            fig.suptitle(f'{self.regions[region]["name"]}: Multi-Scenario Canopy Height Predictions',
+                        fontsize=16, fontweight='bold', y=0.95)
+            # Apply tight layout to image panels only (not colorbar) for two rows
+            plt.tight_layout(rect=[0, 0, 0.85, 0.90])
+        else:
+            fig.suptitle(f'{self.regions[region]["name"]}: Multi-Scenario Canopy Height Predictions',
+                        fontsize=16, fontweight='bold', y=0.95)
+            # Apply tight layout to image panels only (not colorbar) for single row
+            plt.tight_layout(rect=[0, 0, 0.85, 0.95])
         
         # Generate descriptive filename with patch index and plot count
         n_scenarios = len(selected_scenarios)
@@ -612,9 +772,10 @@ def main():
     
     parser = argparse.ArgumentParser(description='Create simplified prediction visualizations')
     parser.add_argument('--scenarios', nargs='+', 
-                       choices=['scenario1_original', 'scenario1', 'scenario1_5', 'scenario2a', 'scenario3a', 'scenario3b', 'scenario4', 'scenario5'],
+                       choices=['scenario1_original', 'scenario1', 'scenario1_5', 'scenario2a', 'scenario3a', 'scenario3b', 'scenario4', 'scenario5', 
+                               'ch_pauls2024', 'ch_tolan2024', 'ch_lang2022', 'ch_potapov2021'],
                        default=['scenario1_original', 'scenario1', 'scenario1_5', 'scenario4', 'scenario5'],
-                       help='Scenarios to include in visualization')
+                       help='Scenarios to include in visualization (including global height products)')
     parser.add_argument('--output-dir', default='chm_outputs/simplified_prediction_visualizations',
                        help='Output directory for visualizations')
     parser.add_argument('--patch-index', type=int, default=None,
